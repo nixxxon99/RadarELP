@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import asyncio
-from datetime import datetime
+from datetime import datetime, timedelta
+import logging
+import os
 from zoneinfo import ZoneInfo
 
 from aiogram import Bot, Dispatcher, F
@@ -16,10 +18,12 @@ from aiogram.types import (
 )
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
+import httpx
 
 from app.config import Settings, load_settings
 from app.hh_jobs import (
     build_title,
+    fetch_hh_areas,
     fetch_hh_vacancies,
     fetch_hh_vacancy_detail,
     get_hh_area_ids,
@@ -29,6 +33,8 @@ from app.hh_jobs import (
     vacancy_company,
     vacancy_summary,
     vacancy_url,
+    HH_API_URL,
+    HH_USER_AGENT,
 )
 from app.scoring import detect_segment, detect_timing, demand_score, guess_company
 from app.sources import SIGNAL_QUERIES_RU, get_all_feed_urls
@@ -36,6 +42,8 @@ from app.storage import Storage
 from app.utils import fetch_rss_items
 from app.yandex_serpapi import fetch_yandex_serpapi_results
 from app.yandex_xml import fetch_yandex_xml_results
+
+logger = logging.getLogger(__name__)
 
 
 def escape_markdown(text: str) -> str:
@@ -122,6 +130,7 @@ async def run_radar_once(bot: Bot, storage: Storage, settings: Settings) -> dict
         try:
             area_ids = get_hh_area_ids()
         except Exception:
+            logger.exception("Failed to load HH area ids")
             area_ids = {"kz": None, "almaty": []}
         almaty_ids = area_ids.get("almaty") or []
         kz_id = area_ids.get("kz")
@@ -135,6 +144,7 @@ async def run_radar_once(bot: Bot, storage: Storage, settings: Settings) -> dict
                 try:
                     result = await asyncio.to_thread(fetch_hh_vacancies, query, area, 5)
                 except Exception:
+                    logger.exception("HH vacancies fetch failed for query=%s area=%s", query, area)
                     continue
                 vacancies = result.items
                 found_total = result.found
@@ -144,6 +154,7 @@ async def run_radar_once(bot: Bot, storage: Storage, settings: Settings) -> dict
                 try:
                     result = await asyncio.to_thread(fetch_hh_vacancies, query, kz_id, 5)
                 except Exception:
+                    logger.exception("HH vacancies fallback failed for query=%s area=%s", query, kz_id)
                     result = None
                 if result:
                     vacancies = result.items
@@ -159,11 +170,17 @@ async def run_radar_once(bot: Bot, storage: Storage, settings: Settings) -> dict
                 company = vacancy_company(vacancy)
                 city = vacancy_city(vacancy)
                 title = build_title(name, company, city)
-                detail = await asyncio.to_thread(fetch_hh_vacancy_detail, vacancy.get("id", ""))
+                try:
+                    detail = await asyncio.to_thread(
+                        fetch_hh_vacancy_detail, vacancy.get("id", "")
+                    )
+                except Exception:
+                    logger.exception("HH vacancy detail failed for id=%s", vacancy.get("id", ""))
+                    detail = None
                 summary = vacancy_summary(vacancy, detail)
                 published = vacancy.get("published_at") or ""
-                score = demand_score(title, summary) + 30
-                score = min(100, score + strong_signal_bonus(f"{title} {summary}"))
+                base_score = max(70, demand_score(title, summary))
+                score = min(100, base_score + strong_signal_bonus(f"{title} {summary}"))
                 lead = {
                     "title": title,
                     "url": url,
@@ -427,31 +444,125 @@ def build_dispatcher(storage: Storage, settings: Settings) -> Dispatcher:
         if message.chat.id != settings.admin_chat_id:
             await message.answer("Команда доступна только администратору.")
             return
-        area_ids = get_hh_area_ids()
-        almaty_ids = area_ids.get("almaty") or []
-        kz_id = area_ids.get("kz")
+        def find_area_id(areas: list[dict], names: set[str]) -> str | None:
+            queue = list(areas)
+            while queue:
+                area = queue.pop(0)
+                name = (area.get("name") or "").strip().lower()
+                if name in names:
+                    return area.get("id")
+                queue.extend(area.get("areas") or [])
+            return None
+
+        try:
+            area_tree = await asyncio.to_thread(fetch_hh_areas)
+        except Exception as exc:
+            await message.answer(f"HH error: {exc}")
+            return
+
+        kz_id = find_area_id(area_tree, {"kazakhstan", "казахстан"})
+        almaty_id = find_area_id(area_tree, {"almaty", "алматы"})
         lines = [
             "HH debug:",
-            f"Алматы IDs: {', '.join(str(item) for item in almaty_ids) or 'не найдено'}",
-            f"KZ ID: {kz_id or 'не найдено'}",
+            f"Kazakhstan ID: {kz_id or 'не найдено'}",
+            f"Almaty ID: {almaty_id or 'не найдено'}",
         ]
-        test_queries = ["руководитель склада", "warehouse manager", "supply chain"]
+        test_queries = ["warehouse manager", "руководитель склада", "supply chain"]
+        headers = {"User-Agent": HH_USER_AGENT}
+        date_from = (datetime.utcnow() - timedelta(days=30)).date().isoformat()
         for query in test_queries:
-            area_to_use = almaty_ids[0] if almaty_ids else kz_id
+            area_to_use = almaty_id or kz_id
             if not area_to_use:
                 lines.append(f"- {query}: area not found")
                 continue
-            result = await asyncio.to_thread(fetch_hh_vacancies, query, area_to_use, 1)
-            examples = []
-            for item in result.items[:2]:
-                title = item.get("name") or ""
-                company = vacancy_company(item)
-                examples.append(f"{title} — {company}".strip(" —"))
-            example_text = "; ".join(examples) if examples else "нет примеров"
+            status_code = None
+            found_total = 0
+            links: list[str] = []
+            error_text = None
+
+            def run_pages(area_id: str) -> bool:
+                nonlocal status_code, found_total, links, error_text
+                with httpx.Client(timeout=15.0, headers=headers) as client:
+                    for page in range(3):
+                        response = client.get(
+                            HH_API_URL,
+                            params={
+                                "text": query,
+                                "area": area_id,
+                                "page": page,
+                                "per_page": 50,
+                                "order_by": "publication_time",
+                                "search_field": "name,company_name,description",
+                                "date_from": date_from,
+                            },
+                        )
+                        status_code = response.status_code
+                        if status_code != 200:
+                            error_text = response.text
+                            return False
+                        payload = response.json()
+                        found_total = payload.get("found", found_total)
+                        for item in payload.get("items", []):
+                            url = vacancy_url(item)
+                            if url and len(links) < 2:
+                                links.append(url)
+                        if len(links) >= 2:
+                            continue
+                return True
+
+            try:
+                ok = await asyncio.to_thread(run_pages, str(area_to_use))
+            except httpx.HTTPError as exc:
+                lines.append(f"- {query}: ошибка {exc}")
+                continue
+
+            if ok and found_total == 0 and kz_id and area_to_use != kz_id:
+                try:
+                    ok = await asyncio.to_thread(run_pages, str(kz_id))
+                    area_to_use = kz_id
+                except httpx.HTTPError as exc:
+                    lines.append(f"- {query}: ошибка {exc}")
+                    continue
+
+            if not ok or status_code in {403, 429}:
+                lines.append(f"- {query}: status={status_code}, ошибка={error_text}")
+                continue
+            link_text = ", ".join(links) if links else "нет ссылок"
             lines.append(
-                f"- {query}: status={result.status_code}, found={result.found}, {example_text}"
+                f"- {query}: area={area_to_use}, status={status_code}, found={found_total}, links={link_text}"
             )
         await message.answer("\n".join(lines), reply_markup=build_main_keyboard())
+
+    @dispatcher.message(Command("debug_status"))
+    async def handle_debug_status(message: Message) -> None:
+        if message.chat.id != settings.admin_chat_id:
+            await message.answer("Команда доступна только администратору.")
+            return
+        period_hours = storage.get_period_hours(message.chat.id)
+        total_leads = storage.count_leads()
+        leads_period = storage.count_leads_since(period_hours)
+        hot_period = storage.count_leads_since(period_hours, min_score=60)
+        hh_period = storage.count_leads_since(period_hours, source="HeadHunter")
+        hh_hot_period = storage.count_leads_since(
+            period_hours, min_score=60, source="HeadHunter"
+        )
+        latest_created = storage.latest_created_at(2)
+        latest_text = ", ".join(latest_created) if latest_created else "нет данных"
+        jobs_scan_env = os.getenv("JOBS_SCAN_ENABLED", "")
+        max_send_env = os.getenv("MAX_SEND_PER_RUN", "")
+        await message.answer(
+            "Debug status:\n"
+            f"period_hours: {period_hours}\n"
+            f"total leads: {total_leads}\n"
+            f"leads за период: {leads_period}\n"
+            f"hot leads за период: {hot_period}\n"
+            f"HH leads за период: {hh_period}\n"
+            f"HH hot за период: {hh_hot_period}\n"
+            f"latest created_at: {latest_text}\n"
+            f"JOBS_SCAN_ENABLED env: {jobs_scan_env or 'unset'}\n"
+            f"MAX_SEND_PER_RUN env: {max_send_env or 'unset'}\n",
+            reply_markup=build_main_keyboard(),
+        )
 
     return dispatcher
 
