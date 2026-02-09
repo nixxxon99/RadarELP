@@ -2,8 +2,11 @@ from __future__ import annotations
 
 import asyncio
 from datetime import datetime, timedelta
+import errno
+import fcntl
 import logging
 import os
+from typing import IO
 from zoneinfo import ZoneInfo
 
 from aiogram import Bot, Dispatcher, F
@@ -44,6 +47,34 @@ from app.yandex_serpapi import fetch_yandex_serpapi_results
 from app.yandex_xml import fetch_yandex_xml_results
 
 logger = logging.getLogger(__name__)
+
+
+def acquire_polling_lock(db_path: str) -> tuple[IO[str], str] | None:
+    candidate_dirs = []
+    db_dir = os.path.dirname(db_path)
+    if db_dir:
+        candidate_dirs.append(db_dir)
+    candidate_dirs.extend(["/var/data", "/tmp"])
+    lock_dir = next(
+        (directory for directory in candidate_dirs if os.path.isdir(directory) and os.access(directory, os.W_OK)),
+        None,
+    )
+    lock_path = os.path.join(lock_dir or ".", "elp_radar_bot.lock")
+    lock_handle = open(lock_path, "a+", encoding="utf-8")
+    try:
+        fcntl.flock(lock_handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError as exc:
+        if exc.errno in (errno.EACCES, errno.EAGAIN):
+            logger.error(
+                "Polling lock already held (%s). Another bot instance is running; exiting.",
+                lock_path,
+            )
+            lock_handle.close()
+            return None
+        lock_handle.close()
+        raise
+    logger.info("Polling lock acquired: %s", lock_path)
+    return lock_handle, lock_path
 
 
 def escape_markdown(text: str) -> str:
@@ -872,18 +903,28 @@ async def main_async() -> None:
         db_path = "radar.db"
     if db_path != settings.db_path:
         logger.warning("DB path fallback in use: %s", db_path)
-    storage = Storage(db_path)
-    bot = Bot(token=settings.bot_token)
-    dispatcher = build_dispatcher(storage, settings)
+    lock_info = acquire_polling_lock(db_path)
+    if lock_info is None:
+        return
+    lock_handle, _lock_path = lock_info
+    try:
+        storage = Storage(db_path)
+        bot = Bot(token=settings.bot_token)
+        dispatcher = build_dispatcher(storage, settings)
 
-    scheduler = AsyncIOScheduler(
-        timezone=ZoneInfo(settings.tz),
-        event_loop=asyncio.get_running_loop(),
-    )
-    schedule_jobs(scheduler, bot, storage, settings)
-    scheduler.start()
+        scheduler = AsyncIOScheduler(
+            timezone=ZoneInfo(settings.tz),
+            event_loop=asyncio.get_running_loop(),
+        )
+        schedule_jobs(scheduler, bot, storage, settings)
+        scheduler.start()
 
-    await dispatcher.start_polling(bot)
+        await dispatcher.start_polling(bot)
+    finally:
+        try:
+            fcntl.flock(lock_handle.fileno(), fcntl.LOCK_UN)
+        finally:
+            lock_handle.close()
 
 
 def main() -> None:
