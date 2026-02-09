@@ -11,6 +11,7 @@ from typing import IO
 from zoneinfo import ZoneInfo
 
 from aiogram import Bot, Dispatcher, F
+from aiogram.exceptions import TelegramConflictError
 from aiogram.filters import Command
 from aiogram.types import (
     CallbackQuery,
@@ -1151,8 +1152,16 @@ async def main_async() -> None:
         )
         schedule_jobs(scheduler, bot, storage, settings)
         scheduler.start()
-
-        await dispatcher.start_polling(bot)
+        try:
+            await bot.delete_webhook(drop_pending_updates=True)
+        except Exception:
+            logger.exception("Failed to clear webhook before polling.")
+        try:
+            await dispatcher.start_polling(bot)
+        except TelegramConflictError:
+            logger.error(
+                "Polling stopped due to Telegram conflict: another getUpdates request is active."
+            )
     finally:
         try:
             fcntl.flock(lock_handle.fileno(), fcntl.LOCK_UN)
