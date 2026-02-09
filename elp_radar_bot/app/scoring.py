@@ -28,6 +28,41 @@ STRONG_SIGNAL_KEYWORDS = [
     "строительств",
 ]
 
+EXPANSION_KEYWORDS = [
+    "расширен",
+    "масштаб",
+    "новый склад",
+    "новый рц",
+    "новый распределительный центр",
+    "новый логистический центр",
+    "запуск склада",
+    "запуск рц",
+    "открытие склада",
+    "открытие рц",
+    "складская сеть",
+    "warehouse expansion",
+    "new warehouse",
+    "new distribution center",
+    "new fulfilment center",
+    "new fulfillment center",
+    "launch warehouse",
+    "logistics expansion",
+]
+
+WAREHOUSE_NEED_KEYWORDS = [
+    "ищем склад",
+    "нужен склад",
+    "аренда склада",
+    "подбор склада",
+    "warehouse leasing",
+    "warehouse rent",
+    "build-to-suit",
+    "bts",
+    "рц под аренду",
+    "открытие склада",
+    "ввод склада",
+]
+
 REGION_KEYWORDS = [
     "kazakhstan",
     "алматы",
@@ -132,6 +167,16 @@ def demand_score(title: str, summary: str) -> int:
     if score == 0:
         score = 5
     return min(score, 100)
+
+
+def detect_expansion_tags(title: str, summary: str) -> list[str]:
+    text = _normalize(f"{title} {summary}")
+    tags: list[str] = []
+    if any(keyword in text for keyword in EXPANSION_KEYWORDS):
+        tags.append("expansion")
+    if any(keyword in text for keyword in WAREHOUSE_NEED_KEYWORDS):
+        tags.append("warehouse_need")
+    return tags
 
 
 def guess_company(title: str) -> str:

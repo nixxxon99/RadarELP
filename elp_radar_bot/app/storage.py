@@ -35,6 +35,12 @@ class Storage:
                     segment TEXT,
                     timing TEXT,
                     company_guess TEXT,
+                    company TEXT,
+                    city TEXT,
+                    role TEXT,
+                    tags TEXT,
+                    last_seen TEXT,
+                    repeat_count INTEGER,
                     created_at TEXT
                 )
                 """
@@ -91,6 +97,24 @@ class Storage:
                 )
                 """
             )
+        self._ensure_column("leads", "company", "TEXT")
+        self._ensure_column("leads", "city", "TEXT")
+        self._ensure_column("leads", "role", "TEXT")
+        self._ensure_column("leads", "tags", "TEXT")
+        self._ensure_column("leads", "last_seen", "TEXT")
+        self._ensure_column("leads", "repeat_count", "INTEGER")
+
+    def _ensure_column(self, table: str, column: str, column_type: str) -> None:
+        existing = {
+            row["name"]
+            for row in self._conn.execute(f"PRAGMA table_info({table})").fetchall()
+        }
+        if column in existing:
+            return
+        with self._conn:
+            self._conn.execute(
+                f"ALTER TABLE {table} ADD COLUMN {column} {column_type}"
+            )
 
     def is_seen(self, url: str) -> bool:
         row = self._conn.execute("SELECT 1 FROM seen WHERE url = ?", (url,)).fetchone()
@@ -103,13 +127,51 @@ class Storage:
                 (url, datetime.utcnow().isoformat()),
             )
 
+    def _find_recent_duplicate(
+        self,
+        company: str,
+        role: str,
+        city: str,
+        since_iso: str,
+    ) -> sqlite3.Row | None:
+        if not company or not role or not city:
+            return None
+        return self._conn.execute(
+            """
+            SELECT id, repeat_count
+            FROM leads
+            WHERE company = ? AND role = ? AND city = ? AND created_at >= ?
+            ORDER BY created_at DESC
+            LIMIT 1
+            """,
+            (company, role, city, since_iso),
+        ).fetchone()
+
     def save_lead(self, lead: dict) -> bool:
+        company = lead.get("company") or ""
+        role = lead.get("role") or ""
+        city = lead.get("city") or ""
+        since_iso = (datetime.utcnow() - timedelta(days=30)).isoformat()
+        duplicate = self._find_recent_duplicate(company, role, city, since_iso)
+        if duplicate:
+            repeat_count = (duplicate["repeat_count"] or 1) + 1
+            with self._conn:
+                self._conn.execute(
+                    """
+                    UPDATE leads
+                    SET last_seen = ?, repeat_count = ?
+                    WHERE id = ?
+                    """,
+                    (datetime.utcnow().isoformat(), repeat_count, duplicate["id"]),
+                )
+            return False
         with self._conn:
             cursor = self._conn.execute(
                 """
                 INSERT OR IGNORE INTO leads
-                    (title, url, published, source, summary, demand_score, segment, timing, company_guess, created_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    (title, url, published, source, summary, demand_score, segment, timing, company_guess,
+                     company, city, role, tags, last_seen, repeat_count, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     lead.get("title"),
@@ -121,6 +183,12 @@ class Storage:
                     lead.get("segment"),
                     lead.get("timing"),
                     lead.get("company_guess"),
+                    company,
+                    city,
+                    role,
+                    lead.get("tags"),
+                    lead.get("last_seen"),
+                    lead.get("repeat_count"),
                     datetime.utcnow().isoformat(),
                 ),
             )

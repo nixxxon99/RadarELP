@@ -44,6 +44,36 @@ HH_QUERIES: list[str] = [
     "transport manager",
 ]
 
+HH_ROLE_SYNONYMS: dict[str, list[str]] = {
+    "директор по логистике": [
+        "директор по логистике",
+        "директор по цепям поставок",
+        "директор цепочек поставок",
+        "руководитель логистики",
+        "руководитель цепей поставок",
+        "head of logistics",
+        "logistics director",
+        "head of supply chain",
+        "supply chain director",
+        "supply chain head",
+    ],
+    "руководитель склада": [
+        "руководитель склада",
+        "warehouse manager",
+        "head of warehouse",
+        "начальник склада",
+        "складской директор",
+    ],
+    "руководитель РЦ": [
+        "руководитель РЦ",
+        "директор РЦ",
+        "distribution center manager",
+        "distribution centre manager",
+        "head of distribution center",
+        "head of distribution centre",
+    ],
+}
+
 HH_STRONG_KEYWORDS = [
     "warehouse",
     "inventory",
@@ -156,7 +186,14 @@ def vacancy_summary(vacancy: dict, detail: dict | None = None) -> str:
     if detail:
         key_skills = detail.get("key_skills") or []
         skills = ", ".join(skill.get("name") for skill in key_skills if skill.get("name"))
-    parts = [part.strip() for part in (requirement, responsibility, skills) if part]
+    industries = ""
+    if detail:
+        employer = detail.get("employer") or {}
+        industry_items = employer.get("industries") or []
+        industries = ", ".join(
+            industry.get("name") for industry in industry_items if industry.get("name")
+        )
+    parts = [part.strip() for part in (requirement, responsibility, skills, industries) if part]
     return " | ".join(parts)
 
 
@@ -172,6 +209,32 @@ def vacancy_company(vacancy: dict) -> str:
 
 def vacancy_url(vacancy: dict) -> str:
     return vacancy.get("alternate_url") or vacancy.get("html_url") or ""
+
+
+def vacancy_role(vacancy: dict) -> str:
+    return vacancy.get("name") or ""
+
+
+def _normalize_query(text: str) -> str:
+    return " ".join((text or "").lower().split())
+
+
+def expand_queries(queries: Iterable[str]) -> list[str]:
+    expanded: list[str] = []
+    seen: set[str] = set()
+    for query in queries:
+        normalized = _normalize_query(query)
+        if normalized and normalized not in seen:
+            expanded.append(query)
+            seen.add(normalized)
+        for synonyms in HH_ROLE_SYNONYMS.values():
+            if normalized in {_normalize_query(item) for item in synonyms}:
+                for variant in synonyms:
+                    variant_normalized = _normalize_query(variant)
+                    if variant_normalized not in seen:
+                        expanded.append(variant)
+                        seen.add(variant_normalized)
+    return expanded
 
 
 def build_title(name: str, company: str, city: str) -> str:
@@ -200,4 +263,5 @@ def strong_signal_bonus(text: str) -> int:
 
 
 def iter_queries(queries: Iterable[str] | None = None) -> Iterable[str]:
-    return queries or HH_QUERIES
+    base_queries = list(queries or HH_QUERIES)
+    return expand_queries(base_queries)
