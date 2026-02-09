@@ -1,0 +1,8 @@
+services:
+  - type: worker
+    name: elp-market-radar
+    env: docker
+    dockerfilePath: ./Dockerfile
+    envVars:
+      - key: TZ
+        value: Asia/Almaty
