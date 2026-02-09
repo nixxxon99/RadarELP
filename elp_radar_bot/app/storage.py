@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import sqlite3
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Iterable
 
 
@@ -36,6 +36,15 @@ class Storage:
                     timing TEXT,
                     company_guess TEXT,
                     created_at TEXT
+                )
+                """
+            )
+            self._conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS settings (
+                    chat_id INTEGER PRIMARY KEY,
+                    period_hours INTEGER,
+                    updated_at TEXT
                 )
                 """
             )
@@ -83,6 +92,56 @@ class Storage:
                 "SELECT * FROM leads WHERE demand_score >= ? ORDER BY created_at DESC LIMIT ?"
             )
             params = (min_score, limit)
+        rows = self._conn.execute(query, params).fetchall()
+        return list(rows)
+
+    def get_period_hours(self, chat_id: int) -> int:
+        row = self._conn.execute(
+            "SELECT period_hours FROM settings WHERE chat_id = ?",
+            (chat_id,),
+        ).fetchone()
+        if row:
+            return int(row["period_hours"])
+        default_hours = 168
+        with self._conn:
+            self._conn.execute(
+                "INSERT OR IGNORE INTO settings (chat_id, period_hours, updated_at) VALUES (?, ?, ?)",
+                (chat_id, default_hours, datetime.utcnow().isoformat()),
+            )
+        return default_hours
+
+    def set_period_hours(self, chat_id: int, hours: int) -> None:
+        with self._conn:
+            self._conn.execute(
+                """
+                INSERT INTO settings (chat_id, period_hours, updated_at)
+                VALUES (?, ?, ?)
+                ON CONFLICT(chat_id) DO UPDATE SET
+                    period_hours = excluded.period_hours,
+                    updated_at = excluded.updated_at
+                """,
+                (chat_id, hours, datetime.utcnow().isoformat()),
+            )
+
+    def leads_since(
+        self,
+        hours: int,
+        min_score: int | None = None,
+        limit: int = 10,
+    ) -> list[sqlite3.Row]:
+        since = datetime.utcnow() - timedelta(hours=hours)
+        since_iso = since.isoformat()
+        if min_score is None:
+            query = (
+                "SELECT * FROM leads WHERE created_at >= ? ORDER BY created_at DESC LIMIT ?"
+            )
+            params: Iterable = (since_iso, limit)
+        else:
+            query = (
+                "SELECT * FROM leads WHERE created_at >= ? AND demand_score >= ? "
+                "ORDER BY created_at DESC LIMIT ?"
+            )
+            params = (since_iso, min_score, limit)
         rows = self._conn.execute(query, params).fetchall()
         return list(rows)
 
