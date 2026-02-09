@@ -14,6 +14,9 @@ class Settings:
     max_items_per_run: int
     max_send_per_run: int
     db_path: str
+    jobs_scan_enabled: bool
+    jobs_scan_interval_hours: int
+    hh_areas: list[int]
 
 
 def _get_int(name: str, default: int) -> int:
@@ -21,6 +24,31 @@ def _get_int(name: str, default: int) -> int:
     if value is None or value.strip() == "":
         return default
     return int(value)
+
+
+def _get_bool(name: str, default: bool) -> bool:
+    value = os.getenv(name)
+    if value is None:
+        return default
+    normalized = value.strip().lower()
+    if normalized in {"1", "true", "yes", "y", "on"}:
+        return True
+    if normalized in {"0", "false", "no", "n", "off"}:
+        return False
+    return default
+
+
+def _get_int_list(name: str, default: list[int]) -> list[int]:
+    value = os.getenv(name)
+    if value is None or value.strip() == "":
+        return default
+    items = []
+    for raw in value.split(","):
+        raw = raw.strip()
+        if not raw:
+            continue
+        items.append(int(raw))
+    return items or default
 
 
 def load_settings() -> Settings:
@@ -40,4 +68,7 @@ def load_settings() -> Settings:
         max_items_per_run=_get_int("MAX_ITEMS_PER_RUN", 50),
         max_send_per_run=_get_int("MAX_SEND_PER_RUN", 10),
         db_path=os.getenv("DB_PATH", "radar.db"),
+        jobs_scan_enabled=_get_bool("JOBS_SCAN_ENABLED", True),
+        jobs_scan_interval_hours=_get_int("JOBS_SCAN_INTERVAL_HOURS", 6),
+        hh_areas=_get_int_list("HH_AREAS", [40, 160]),
     )

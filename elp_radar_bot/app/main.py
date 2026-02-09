@@ -18,6 +18,16 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
 
 from app.config import Settings, load_settings
+from app.hh_jobs import (
+    build_title,
+    fetch_hh_vacancies,
+    iter_queries,
+    strong_signal_bonus,
+    vacancy_city,
+    vacancy_company,
+    vacancy_summary,
+    vacancy_url,
+)
 from app.scoring import detect_segment, detect_timing, demand_score, guess_company
 from app.sources import get_all_feed_urls
 from app.storage import Storage
@@ -90,6 +100,71 @@ async def run_radar_once(bot: Bot, storage: Storage, settings: Settings) -> dict
     collected = 0
     sent = 0
     new_leads = 0
+    now = datetime.utcnow()
+
+    async def scan_hh_jobs(remaining: int) -> dict:
+        hh_collected = 0
+        hh_new = 0
+        hh_sent = 0
+        if not settings.jobs_scan_enabled:
+            return {"collected": 0, "new": 0, "sent": 0}
+
+        last_scan = storage.get_last_scan("hh_jobs")
+        if last_scan:
+            delta_hours = (now - last_scan).total_seconds() / 3600
+            if delta_hours < settings.jobs_scan_interval_hours:
+                return {"collected": 0, "new": 0, "sent": 0}
+
+        for area in settings.hh_areas:
+            for query in iter_queries():
+                if hh_collected >= remaining:
+                    break
+                vacancies = await asyncio.to_thread(fetch_hh_vacancies, query, area, 1)
+                for vacancy in vacancies:
+                    if hh_collected >= remaining:
+                        break
+                    hh_collected += 1
+                    url = vacancy_url(vacancy)
+                    if not url or storage.is_seen(url):
+                        continue
+                    name = vacancy.get("name") or ""
+                    company = vacancy_company(vacancy)
+                    city = vacancy_city(vacancy)
+                    title = build_title(name, company, city)
+                    summary = vacancy_summary(vacancy)
+                    published = vacancy.get("published_at") or ""
+                    score = demand_score(title, summary)
+                    score = min(100, score + strong_signal_bonus(f"{title} {summary}"))
+                    lead = {
+                        "title": title,
+                        "url": url,
+                        "published": published,
+                        "source": "HeadHunter",
+                        "summary": summary,
+                        "demand_score": score,
+                        "segment": detect_segment(title, summary),
+                        "timing": "0–3 мес",
+                        "company_guess": company or guess_company(title),
+                    }
+                    saved = storage.save_lead(lead)
+                    storage.mark_seen(url)
+                    if saved:
+                        hh_new += 1
+                        if lead["demand_score"] >= 60 and sent + hh_sent < settings.max_send_per_run:
+                            await bot.send_message(
+                                chat_id=settings.admin_chat_id,
+                                text=format_lead(lead),
+                                parse_mode="Markdown",
+                                disable_web_page_preview=True,
+                            )
+                            hh_sent += 1
+                if hh_collected >= remaining:
+                    break
+            if hh_collected >= remaining:
+                break
+
+        storage.set_last_scan("hh_jobs", now)
+        return {"collected": hh_collected, "new": hh_new, "sent": hh_sent}
 
     for feed_url in feeds:
         items = await asyncio.to_thread(fetch_rss_items, feed_url)
@@ -125,6 +200,13 @@ async def run_radar_once(bot: Bot, storage: Storage, settings: Settings) -> dict
                     sent += 1
         if collected >= settings.max_items_per_run:
             break
+
+    remaining = settings.max_items_per_run - collected
+    if remaining > 0:
+        hh_result = await scan_hh_jobs(remaining)
+        collected += hh_result["collected"]
+        new_leads += hh_result["new"]
+        sent += hh_result["sent"]
 
     return {"collected": collected, "new_leads": new_leads, "sent": sent}
 
