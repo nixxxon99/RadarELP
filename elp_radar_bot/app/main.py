@@ -149,17 +149,24 @@ def schedule_jobs(scheduler: AsyncIOScheduler, bot: Bot, storage: Storage, setti
     scheduler.add_job(run_radar_once, trigger=trigger, args=[bot, storage, settings])
 
 
-def main() -> None:
+async def main_async() -> None:
     settings = load_settings()
     storage = Storage(settings.db_path)
     bot = Bot(token=settings.bot_token)
     dispatcher = build_dispatcher(storage, settings)
 
-    scheduler = AsyncIOScheduler(timezone=ZoneInfo(settings.tz))
+    scheduler = AsyncIOScheduler(
+        timezone=ZoneInfo(settings.tz),
+        event_loop=asyncio.get_running_loop(),
+    )
     schedule_jobs(scheduler, bot, storage, settings)
     scheduler.start()
 
-    dispatcher.run_polling(bot)
+    await dispatcher.start_polling(bot)
+
+
+def main() -> None:
+    asyncio.run(main_async())
 
 
 if __name__ == "__main__":
