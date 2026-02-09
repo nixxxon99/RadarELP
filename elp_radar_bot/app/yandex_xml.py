@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass
+import logging
 from typing import Iterable
 from urllib.parse import quote_plus
 
@@ -12,6 +13,7 @@ from app.config import Settings
 YANDEX_XML_URL = "https://yandex.com/search/xml"
 YANDEX_XML_USER_AGENT = "ELP-Radar/1.0 (contact: support@example.com)"
 
+logger = logging.getLogger(__name__)
 
 @dataclass(frozen=True)
 class YandexXmlResult:
@@ -41,6 +43,7 @@ def fetch_yandex_xml_results(
     settings: Settings,
     queries: Iterable[str],
     max_results_per_query: int = 5,
+    errors: list[str] | None = None,
 ) -> list[YandexXmlResult]:
     if not _is_enabled(settings):
         return []
@@ -52,7 +55,10 @@ def fetch_yandex_xml_results(
                 continue
             try:
                 root = ET.fromstring(response.text)
-            except ET.ParseError:
+            except ET.ParseError as exc:
+                logger.exception("Yandex XML parse error for query=%s", query)
+                if errors is not None:
+                    errors.append(f"Yandex XML parse error for query='{query}': {exc}")
                 continue
             for doc in root.findall(".//doc")[:max_results_per_query]:
                 url = doc.findtext("url") or ""

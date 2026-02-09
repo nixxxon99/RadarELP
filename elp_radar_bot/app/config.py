@@ -72,7 +72,7 @@ def load_settings() -> Settings:
         daily_minute=_get_int("DAILY_MINUTE", 0),
         max_items_per_run=_get_int("MAX_ITEMS_PER_RUN", 50),
         max_send_per_run=_get_int("MAX_SEND_PER_RUN", 10),
-        db_path=os.getenv("DB_PATH", "radar.db"),
+        db_path=os.getenv("DB_PATH", "/var/data/radar.db"),
         jobs_scan_enabled=_get_bool("JOBS_SCAN_ENABLED", True),
         jobs_scan_interval_hours=_get_int("JOBS_SCAN_INTERVAL_HOURS", 6),
         hh_areas=_get_int_list("HH_AREAS", [40, 160]),

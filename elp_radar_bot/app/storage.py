@@ -107,6 +107,17 @@ class Storage:
         row = self._conn.execute("SELECT COUNT(*) AS total FROM leads").fetchone()
         return int(row["total"]) if row else 0
 
+    def count_seen(self) -> int:
+        row = self._conn.execute("SELECT COUNT(*) AS total FROM seen").fetchone()
+        return int(row["total"]) if row else 0
+
+    def latest_leads(self, limit: int = 3) -> list[sqlite3.Row]:
+        rows = self._conn.execute(
+            "SELECT title, source, created_at FROM leads ORDER BY created_at DESC LIMIT ?",
+            (limit,),
+        ).fetchall()
+        return list(rows)
+
     def count_leads_since(
         self,
         hours: int,
