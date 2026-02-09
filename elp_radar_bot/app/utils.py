@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import logging
 from typing import Iterable
-import feedparser
+
 from bs4 import BeautifulSoup
+import feedparser
+import httpx
 
 logger = logging.getLogger(__name__)
 
@@ -14,8 +16,11 @@ def clean_html(text: str) -> str:
     return soup.get_text(" ", strip=True)
 
 
-def fetch_rss_items(feed_url: str) -> list[dict]:
-    feed = feedparser.parse(feed_url)
+def fetch_rss_items(feed_url: str, timeout: float = 10.0) -> list[dict]:
+    with httpx.Client(timeout=timeout) as client:
+        response = client.get(feed_url)
+        response.raise_for_status()
+        feed = feedparser.parse(response.content)
     source_title = feed.feed.get("title", "")
     if not feed.entries:
         status = getattr(feed, "status", None)

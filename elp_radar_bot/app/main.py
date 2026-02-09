@@ -80,8 +80,9 @@ def build_main_keyboard() -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup(
         keyboard=[
             [KeyboardButton(text="🔥 Лиды"), KeyboardButton(text="📡 Радар")],
-            [KeyboardButton(text="🧲 Лиды HH"), KeyboardButton(text="⏱ Период")],
-            [KeyboardButton(text="🔎 Скан сейчас"), KeyboardButton(text="⚙️ Настройки")],
+            [KeyboardButton(text="🧲 Лиды HH"), KeyboardButton(text="🔥 HH Hot")],
+            [KeyboardButton(text="⏱ Период"), KeyboardButton(text="🔎 Скан сейчас")],
+            [KeyboardButton(text="⚙️ Настройки")],
         ],
         resize_keyboard=True,
     )
@@ -108,14 +109,22 @@ def describe_period(hours: int) -> str:
 
 
 def format_scan_report(result: dict) -> str:
-    hh_status = result.get("hh_status_code")
-    hh_found = result.get("hh_found")
+    hh_status = result.get("hh_status_code", 0)
+    hh_found = result.get("hh_found", 0)
     hh_links = result.get("hh_links") or []
     hh_links_text = ", ".join(hh_links) if hh_links else "нет"
+    hh_error = result.get("hh_error")
+    hh_disabled = result.get("hh_disabled", False)
     yandex_source = result.get("yandex_source") or "Yandex"
+    rss_failed = result.get("feeds_failed", 0)
+    rss_errors = result.get("rss_errors") or []
     lines = [
         "Сканирование завершено.",
-        f"RSS feeds обработано: {result.get('feeds_processed', 0)}/{result.get('feeds_total', 0)}",
+        (
+            "RSS feeds ok/total: "
+            f"{result.get('feeds_ok', 0)}/{result.get('feeds_total', 0)}, "
+            f"failed: {rss_failed}"
+        ),
         "Items по источникам:",
         f"- Google RSS: {result.get('rss_items', 0)}",
         f"- {yandex_source}: {result.get('yandex_items', 0)}",
@@ -123,8 +132,17 @@ def format_scan_report(result: dict) -> str:
         f"Новые лиды: {result.get('new_leads', 0)}",
         f"Отброшено как seen: {result.get('seen', 0)}",
         f"Отправлено hot: {result.get('sent', 0)}",
-        f"HH status={hh_status}, found={hh_found}, links={hh_links_text}",
     ]
+    if hh_disabled:
+        lines.append("HH: disabled")
+    else:
+        hh_line = f"HH status={hh_status}, found={hh_found}, links={hh_links_text}"
+        if hh_error:
+            hh_line = f"{hh_line}, error={hh_error}"
+        lines.append(hh_line)
+    if rss_errors:
+        for error in rss_errors[:3]:
+            lines.append(f"RSS error: {error}")
     for error in result.get("errors", []):
         lines.append(f"ERROR: {error}")
     return "\n".join(lines)
@@ -137,22 +155,30 @@ async def run_radar_once(bot: Bot, storage: Storage, settings: Settings) -> dict
     new_leads = 0
     rss_items = 0
     rss_seen = 0
-    feeds_processed = 0
+    feeds_ok = 0
+    feeds_failed = 0
     yandex_items = 0
     yandex_new = 0
     yandex_seen = 0
     hh_items = 0
     hh_new = 0
     hh_seen = 0
-    hh_status_code: int | None = None
+    hh_status_code = 0
     hh_found = 0
     hh_links: list[str] = []
+    hh_error: str | None = None
+    hh_disabled = not settings.jobs_scan_enabled
     errors: list[str] = []
+    rss_errors: list[str] = []
     now = datetime.utcnow()
 
     async def scan_hh_jobs(remaining: int) -> dict:
-        nonlocal hh_status_code, hh_found, hh_links, hh_items, hh_new, hh_seen, sent
+        nonlocal hh_status_code, hh_found, hh_links, hh_items, hh_new, hh_seen, sent, hh_error
         if not settings.jobs_scan_enabled:
+            hh_status_code = 0
+            hh_found = 0
+            hh_links = []
+            hh_error = None
             return {"collected": 0, "new": 0, "sent": 0}
 
         last_scan = storage.get_last_scan("hh_jobs")
@@ -165,11 +191,19 @@ async def run_radar_once(bot: Bot, storage: Storage, settings: Settings) -> dict
             area_ids = get_hh_area_ids()
         except Exception as exc:
             logger.exception("Failed to load HH area ids")
+            hh_error = f"area ids error: {exc}"
             errors.append(f"HH area ids error: {exc}")
             area_ids = {"kz": None, "almaty": []}
         almaty_ids = area_ids.get("almaty") or []
         kz_id = area_ids.get("kz")
         area_candidates = almaty_ids or settings.hh_areas
+        if not area_candidates and not kz_id:
+            hh_status_code = 0
+            hh_found = 0
+            hh_links = []
+            hh_error = "area not found"
+            errors.append("HH area not found")
+            return {"collected": 0, "new": 0, "sent": 0}
         for query in iter_queries():
             if hh_items >= remaining:
                 break
@@ -189,19 +223,18 @@ async def run_radar_once(bot: Bot, storage: Storage, settings: Settings) -> dict
                     errors.append(
                         f"HH fetch error status={status_code} query='{query}' area={area}"
                     )
-                    if status_code in {403, 429}:
-                        hh_status_code = status_code
+                    hh_error = f"fetch error status={status_code}"
                     continue
                 except Exception as exc:
                     logger.exception("HH vacancies fetch failed for query=%s area=%s", query, area)
                     errors.append(f"HH fetch error query='{query}' area={area}: {exc}")
+                    hh_error = f"fetch error: {exc}"
                     continue
                 vacancies = result.items
                 found_total = result.found
-                if hh_status_code is None:
-                    hh_status_code = result.status_code
-                    hh_found = found_total
-                    hh_links = [vacancy_url(item) for item in vacancies if vacancy_url(item)][:2]
+                hh_status_code = result.status_code
+                hh_found = found_total
+                hh_links = [vacancy_url(item) for item in vacancies if vacancy_url(item)][:2]
                 if found_total > 0:
                     break
             if found_total == 0 and kz_id:
@@ -218,19 +251,18 @@ async def run_radar_once(bot: Bot, storage: Storage, settings: Settings) -> dict
                     errors.append(
                         f"HH fallback error status={status_code} query='{query}' area={kz_id}"
                     )
-                    if status_code in {403, 429}:
-                        hh_status_code = status_code
+                    hh_error = f"fallback error status={status_code}"
                     result = None
                 except Exception as exc:
                     logger.exception("HH vacancies fallback failed for query=%s area=%s", query, kz_id)
                     errors.append(f"HH fallback error query='{query}' area={kz_id}: {exc}")
+                    hh_error = f"fallback error: {exc}"
                     result = None
                 if result:
                     vacancies = result.items
-                    if hh_status_code is None:
-                        hh_status_code = result.status_code
-                        hh_found = result.found
-                        hh_links = [vacancy_url(item) for item in vacancies if vacancy_url(item)][:2]
+                    hh_status_code = result.status_code
+                    hh_found = result.found
+                    hh_links = [vacancy_url(item) for item in vacancies if vacancy_url(item)][:2]
 
             for vacancy in vacancies:
                 if hh_items >= remaining:
@@ -252,6 +284,7 @@ async def run_radar_once(bot: Bot, storage: Storage, settings: Settings) -> dict
                 except Exception as exc:
                     logger.exception("HH vacancy detail failed for id=%s", vacancy.get("id", ""))
                     errors.append(f"HH vacancy detail error id={vacancy.get('id', '')}: {exc}")
+                    hh_error = f"detail error: {exc}"
                     detail = None
                 summary = vacancy_summary(vacancy, detail)
                 published = vacancy.get("published_at") or ""
@@ -370,13 +403,16 @@ async def run_radar_once(bot: Bot, storage: Storage, settings: Settings) -> dict
         if index < 2:
             logger.info("Google RSS feed URL: %s", feed_url)
         try:
-            items = await asyncio.to_thread(fetch_rss_items, feed_url)
+            items = await asyncio.wait_for(
+                asyncio.to_thread(fetch_rss_items, feed_url, 10.0),
+                timeout=15.0,
+            )
         except Exception as exc:
             logger.exception("RSS fetch failed for feed=%s", feed_url)
-            errors.append(f"RSS fetch failed for {feed_url}: {exc}")
-            feeds_processed += 1
+            feeds_failed += 1
+            rss_errors.append(f"{feed_url}: {exc}")
             continue
-        feeds_processed += 1
+        feeds_ok += 1
         rss_items += len(items)
         for item in items:
             if collected >= settings.max_items_per_run:
@@ -431,6 +467,8 @@ async def run_radar_once(bot: Bot, storage: Storage, settings: Settings) -> dict
     remaining = settings.max_items_per_run - collected
     if remaining > 0:
         hh_result = await scan_hh_jobs(remaining)
+        if not settings.jobs_scan_enabled:
+            hh_disabled = True
         collected += hh_result["collected"]
         new_leads += hh_result["new"]
 
@@ -440,7 +478,8 @@ async def run_radar_once(bot: Bot, storage: Storage, settings: Settings) -> dict
         "new_leads": new_leads,
         "sent": sent,
         "feeds_total": len(feeds),
-        "feeds_processed": feeds_processed,
+        "feeds_ok": feeds_ok,
+        "feeds_failed": feeds_failed,
         "rss_items": rss_items,
         "yandex_items": yandex_items,
         "yandex_source": yandex_source,
@@ -449,7 +488,10 @@ async def run_radar_once(bot: Bot, storage: Storage, settings: Settings) -> dict
         "hh_status_code": hh_status_code,
         "hh_found": hh_found,
         "hh_links": hh_links,
+        "hh_error": hh_error,
+        "hh_disabled": hh_disabled,
         "errors": errors,
+        "rss_errors": rss_errors,
     }
 
 
@@ -521,6 +563,25 @@ def build_dispatcher(storage: Storage, settings: Settings) -> Dispatcher:
         rows = storage.leads_since(
             message.chat.id,
             hours=period_hours,
+            source="HeadHunter",
+            limit=10,
+        )
+        if not rows:
+            await message.answer("Пока нет лидов HH.", reply_markup=build_main_keyboard())
+            return
+        for row in rows:
+            await message.answer(
+                format_lead(dict(row)),
+                parse_mode="Markdown",
+                disable_web_page_preview=True,
+            )
+
+    @dispatcher.message(Command("hh_hot"))
+    async def handle_hh_hot(message: Message) -> None:
+        period_hours = storage.get_period_hours(message.chat.id)
+        rows = storage.leads_since(
+            message.chat.id,
+            hours=period_hours,
             min_score=60,
             source="HeadHunter",
             limit=10,
@@ -534,6 +595,10 @@ def build_dispatcher(storage: Storage, settings: Settings) -> Dispatcher:
                 parse_mode="Markdown",
                 disable_web_page_preview=True,
             )
+
+    @dispatcher.message(F.text == "🔥 HH Hot")
+    async def handle_hh_hot_button(message: Message) -> None:
+        await handle_hh_hot(message)
 
     @dispatcher.message(F.text == "⏱ Период")
     async def handle_period_button(message: Message) -> None:
