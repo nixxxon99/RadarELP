@@ -1,0 +1,5 @@
+aiogram>=3.4,<4.0
+APScheduler>=3.10,<4.0
+feedparser>=6.0,<7.0
+beautifulsoup4>=4.12,<5.0
+lxml>=4.9,<6.0
