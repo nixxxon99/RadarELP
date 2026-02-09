@@ -103,6 +103,40 @@ class Storage:
         rows = self._conn.execute(query, params).fetchall()
         return list(rows)
 
+    def count_leads(self) -> int:
+        row = self._conn.execute("SELECT COUNT(*) AS total FROM leads").fetchone()
+        return int(row["total"]) if row else 0
+
+    def count_leads_since(
+        self,
+        hours: int,
+        min_score: int | None = None,
+        source: str | None = None,
+    ) -> int:
+        since = datetime.utcnow() - timedelta(hours=hours)
+        since_iso = since.isoformat()
+        filters = ["created_at >= ?"]
+        params: list = [since_iso]
+        if min_score is not None:
+            filters.append("demand_score >= ?")
+            params.append(min_score)
+        if source:
+            filters.append("source = ?")
+            params.append(source)
+        where_clause = " AND ".join(filters)
+        row = self._conn.execute(
+            f"SELECT COUNT(*) AS total FROM leads WHERE {where_clause}",
+            params,
+        ).fetchone()
+        return int(row["total"]) if row else 0
+
+    def latest_created_at(self, limit: int = 2) -> list[str]:
+        rows = self._conn.execute(
+            "SELECT created_at FROM leads ORDER BY created_at DESC LIMIT ?",
+            (limit,),
+        ).fetchall()
+        return [row["created_at"] for row in rows if row and row["created_at"]]
+
     def get_period_hours(self, chat_id: int) -> int:
         row = self._conn.execute(
             "SELECT period_hours FROM settings WHERE chat_id = ?",
