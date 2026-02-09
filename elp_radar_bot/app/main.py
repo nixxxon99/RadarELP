@@ -115,10 +115,15 @@ def format_scan_report(result: dict) -> str:
     hh_links_text = ", ".join(hh_links) if hh_links else "нет"
     hh_error = result.get("hh_error")
     hh_disabled = result.get("hh_disabled", False)
+    hh_skipped_reason = result.get("hh_skipped_reason")
     yandex_source = result.get("yandex_source") or "Yandex"
     rss_failed = result.get("feeds_failed", 0)
     rss_ok = result.get("feeds_ok", 0)
     rss_errors = result.get("rss_errors") or []
+    if yandex_source == "disabled":
+        yandex_line = "- Yandex: disabled (enable YANDEX_XML_ENABLED or YANDEX_SERPAPI_ENABLED)"
+    else:
+        yandex_line = f"- {yandex_source}: {result.get('yandex_items', 0)}"
     lines = [
         "Сканирование завершено.",
         (
@@ -127,7 +132,7 @@ def format_scan_report(result: dict) -> str:
         ),
         "Items по источникам:",
         f"- Google RSS: {result.get('rss_items', 0)}",
-        f"- {yandex_source}: {result.get('yandex_items', 0)}",
+        yandex_line,
         f"- HH: {result.get('hh_items', 0)}",
         f"Новые лиды: {result.get('new_leads', 0)}",
         f"Отброшено как seen: {result.get('seen', 0)}",
@@ -135,6 +140,8 @@ def format_scan_report(result: dict) -> str:
     ]
     if hh_disabled:
         lines.append("HH: disabled")
+    elif hh_skipped_reason:
+        lines.append(f"HH: skipped ({hh_skipped_reason})")
     else:
         hh_line = f"HH status={hh_status}, found={hh_found}, links={hh_links_text}"
         if hh_error:
@@ -168,12 +175,14 @@ async def run_radar_once(bot: Bot, storage: Storage, settings: Settings) -> dict
     hh_links: list[str] = []
     hh_error: str | None = None
     hh_disabled = not settings.jobs_scan_enabled
+    hh_skipped_reason: str | None = None
     errors: list[str] = []
     rss_errors: list[str] = []
     now = datetime.utcnow()
 
     async def scan_hh_jobs(remaining: int) -> dict:
         nonlocal hh_status_code, hh_found, hh_links, hh_items, hh_new, hh_seen, sent, hh_error
+        nonlocal hh_skipped_reason
         if not settings.jobs_scan_enabled:
             hh_status_code = 0
             hh_found = 0
@@ -185,6 +194,9 @@ async def run_radar_once(bot: Bot, storage: Storage, settings: Settings) -> dict
         if last_scan:
             delta_hours = (now - last_scan).total_seconds() / 3600
             if delta_hours < settings.jobs_scan_interval_hours:
+                hh_skipped_reason = (
+                    f"interval {settings.jobs_scan_interval_hours}h not reached"
+                )
                 return {"collected": 0, "new": 0, "sent": 0}
 
         try:
@@ -490,6 +502,7 @@ async def run_radar_once(bot: Bot, storage: Storage, settings: Settings) -> dict
         "hh_links": hh_links,
         "hh_error": hh_error,
         "hh_disabled": hh_disabled,
+        "hh_skipped_reason": hh_skipped_reason,
         "errors": errors,
         "rss_errors": rss_errors,
     }
