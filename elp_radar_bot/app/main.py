@@ -117,13 +117,13 @@ def format_scan_report(result: dict) -> str:
     hh_disabled = result.get("hh_disabled", False)
     yandex_source = result.get("yandex_source") or "Yandex"
     rss_failed = result.get("feeds_failed", 0)
+    rss_ok = result.get("feeds_ok", 0)
     rss_errors = result.get("rss_errors") or []
     lines = [
         "Сканирование завершено.",
         (
-            "RSS feeds ok/total: "
-            f"{result.get('feeds_ok', 0)}/{result.get('feeds_total', 0)}, "
-            f"failed: {rss_failed}"
+            "RSS feeds ok/failed: "
+            f"{rss_ok}/{rss_failed}"
         ),
         "Items по источникам:",
         f"- Google RSS: {result.get('rss_items', 0)}",
@@ -140,7 +140,7 @@ def format_scan_report(result: dict) -> str:
         if hh_error:
             hh_line = f"{hh_line}, error={hh_error}"
         lines.append(hh_line)
-    if rss_errors:
+    if rss_failed and rss_errors:
         for error in rss_errors[:3]:
             lines.append(f"RSS error: {error}")
     for error in result.get("errors", []):

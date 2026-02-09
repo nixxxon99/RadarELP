@@ -17,9 +17,15 @@ def clean_html(text: str) -> str:
 
 
 def fetch_rss_items(feed_url: str, timeout: float = 10.0) -> list[dict]:
-    with httpx.Client(timeout=timeout) as client:
+    headers = {"User-Agent": "Mozilla/5.0 (compatible; ELP-Radar/1.0; +https://example.com)"}
+    with httpx.Client(
+        timeout=timeout,
+        follow_redirects=True,
+        headers=headers,
+    ) as client:
         response = client.get(feed_url)
-        response.raise_for_status()
+        if response.status_code >= 400:
+            response.raise_for_status()
         feed = feedparser.parse(response.content)
     source_title = feed.feed.get("title", "")
     if not feed.entries:
