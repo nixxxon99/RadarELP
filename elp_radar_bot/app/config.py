@@ -17,6 +17,11 @@ class Settings:
     jobs_scan_enabled: bool
     jobs_scan_interval_hours: int
     hh_areas: list[int]
+    yandex_xml_enabled: bool
+    yandex_xml_user: str
+    yandex_xml_key: str
+    yandex_serpapi_enabled: bool
+    yandex_serpapi_key: str
 
 
 def _get_int(name: str, default: int) -> int:
@@ -71,4 +76,9 @@ def load_settings() -> Settings:
         jobs_scan_enabled=_get_bool("JOBS_SCAN_ENABLED", True),
         jobs_scan_interval_hours=_get_int("JOBS_SCAN_INTERVAL_HOURS", 6),
         hh_areas=_get_int_list("HH_AREAS", [40, 160]),
+        yandex_xml_enabled=_get_bool("YANDEX_XML_ENABLED", False),
+        yandex_xml_user=os.getenv("YANDEX_XML_USER", "").strip(),
+        yandex_xml_key=os.getenv("YANDEX_XML_KEY", "").strip(),
+        yandex_serpapi_enabled=_get_bool("YANDEX_SERPAPI_ENABLED", False),
+        yandex_serpapi_key=os.getenv("YANDEX_SERPAPI_KEY", "").strip(),
     )

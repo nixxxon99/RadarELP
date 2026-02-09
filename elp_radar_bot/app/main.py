@@ -21,6 +21,8 @@ from app.config import Settings, load_settings
 from app.hh_jobs import (
     build_title,
     fetch_hh_vacancies,
+    fetch_hh_vacancy_detail,
+    get_hh_area_ids,
     iter_queries,
     strong_signal_bonus,
     vacancy_city,
@@ -29,9 +31,11 @@ from app.hh_jobs import (
     vacancy_url,
 )
 from app.scoring import detect_segment, detect_timing, demand_score, guess_company
-from app.sources import get_all_feed_urls
+from app.sources import SIGNAL_QUERIES_RU, get_all_feed_urls
 from app.storage import Storage
 from app.utils import fetch_rss_items
+from app.yandex_serpapi import fetch_yandex_serpapi_results
+from app.yandex_xml import fetch_yandex_xml_results
 
 
 def escape_markdown(text: str) -> str:
@@ -68,8 +72,8 @@ def build_main_keyboard() -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup(
         keyboard=[
             [KeyboardButton(text="🔥 Лиды"), KeyboardButton(text="📡 Радар")],
-            [KeyboardButton(text="⏱ Период"), KeyboardButton(text="🔎 Скан сейчас")],
-            [KeyboardButton(text="⚙️ Настройки")],
+            [KeyboardButton(text="🧲 Лиды HH"), KeyboardButton(text="⏱ Период")],
+            [KeyboardButton(text="🔎 Скан сейчас"), KeyboardButton(text="⚙️ Настройки")],
         ],
         resize_keyboard=True,
     )
@@ -79,12 +83,12 @@ def build_period_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [
-                InlineKeyboardButton(text="24 часа", callback_data="period:24h"),
-                InlineKeyboardButton(text="3 дня", callback_data="period:3d"),
+                InlineKeyboardButton(text="24 часа", callback_data="period:24"),
+                InlineKeyboardButton(text="3 дня", callback_data="period:72"),
             ],
             [
-                InlineKeyboardButton(text="7 дней", callback_data="period:7d"),
-                InlineKeyboardButton(text="30 дней", callback_data="period:30d"),
+                InlineKeyboardButton(text="7 дней", callback_data="period:168"),
+                InlineKeyboardButton(text="30 дней", callback_data="period:720"),
             ],
         ]
     )
@@ -115,56 +119,142 @@ async def run_radar_once(bot: Bot, storage: Storage, settings: Settings) -> dict
             if delta_hours < settings.jobs_scan_interval_hours:
                 return {"collected": 0, "new": 0, "sent": 0}
 
-        for area in settings.hh_areas:
-            for query in iter_queries():
-                if hh_collected >= remaining:
-                    break
-                vacancies = await asyncio.to_thread(fetch_hh_vacancies, query, area, 1)
-                for vacancy in vacancies:
-                    if hh_collected >= remaining:
-                        break
-                    hh_collected += 1
-                    url = vacancy_url(vacancy)
-                    if not url or storage.is_seen(url):
-                        continue
-                    name = vacancy.get("name") or ""
-                    company = vacancy_company(vacancy)
-                    city = vacancy_city(vacancy)
-                    title = build_title(name, company, city)
-                    summary = vacancy_summary(vacancy)
-                    published = vacancy.get("published_at") or ""
-                    score = demand_score(title, summary)
-                    score = min(100, score + strong_signal_bonus(f"{title} {summary}"))
-                    lead = {
-                        "title": title,
-                        "url": url,
-                        "published": published,
-                        "source": "HeadHunter",
-                        "summary": summary,
-                        "demand_score": score,
-                        "segment": detect_segment(title, summary),
-                        "timing": "0–3 мес",
-                        "company_guess": company or guess_company(title),
-                    }
-                    saved = storage.save_lead(lead)
-                    storage.mark_seen(url)
-                    if saved:
-                        hh_new += 1
-                        if lead["demand_score"] >= 60 and sent + hh_sent < settings.max_send_per_run:
-                            await bot.send_message(
-                                chat_id=settings.admin_chat_id,
-                                text=format_lead(lead),
-                                parse_mode="Markdown",
-                                disable_web_page_preview=True,
-                            )
-                            hh_sent += 1
-                if hh_collected >= remaining:
-                    break
+        try:
+            area_ids = get_hh_area_ids()
+        except Exception:
+            area_ids = {"kz": None, "almaty": []}
+        almaty_ids = area_ids.get("almaty") or []
+        kz_id = area_ids.get("kz")
+        area_candidates = almaty_ids or settings.hh_areas
+        for query in iter_queries():
             if hh_collected >= remaining:
                 break
+            vacancies = []
+            found_total = 0
+            for area in area_candidates:
+                try:
+                    result = await asyncio.to_thread(fetch_hh_vacancies, query, area, 5)
+                except Exception:
+                    continue
+                vacancies = result.items
+                found_total = result.found
+                if found_total > 0:
+                    break
+            if found_total == 0 and kz_id:
+                try:
+                    result = await asyncio.to_thread(fetch_hh_vacancies, query, kz_id, 5)
+                except Exception:
+                    result = None
+                if result:
+                    vacancies = result.items
+
+            for vacancy in vacancies:
+                if hh_collected >= remaining:
+                    break
+                hh_collected += 1
+                url = vacancy_url(vacancy)
+                if not url or storage.is_seen(url):
+                    continue
+                name = vacancy.get("name") or ""
+                company = vacancy_company(vacancy)
+                city = vacancy_city(vacancy)
+                title = build_title(name, company, city)
+                detail = await asyncio.to_thread(fetch_hh_vacancy_detail, vacancy.get("id", ""))
+                summary = vacancy_summary(vacancy, detail)
+                published = vacancy.get("published_at") or ""
+                score = demand_score(title, summary) + 30
+                score = min(100, score + strong_signal_bonus(f"{title} {summary}"))
+                lead = {
+                    "title": title,
+                    "url": url,
+                    "published": published,
+                    "source": "HeadHunter",
+                    "summary": summary,
+                    "demand_score": score,
+                    "segment": detect_segment(title, summary),
+                    "timing": "0–3 мес",
+                    "company_guess": company or guess_company(title),
+                }
+                saved = storage.save_lead(lead)
+                storage.mark_seen(url)
+                if saved:
+                    hh_new += 1
+                    if lead["demand_score"] >= 60 and sent + hh_sent < settings.max_send_per_run:
+                        await bot.send_message(
+                            chat_id=settings.admin_chat_id,
+                            text=format_lead(lead),
+                            parse_mode="Markdown",
+                            disable_web_page_preview=True,
+                        )
+                        hh_sent += 1
 
         storage.set_last_scan("hh_jobs", now)
         return {"collected": hh_collected, "new": hh_new, "sent": hh_sent}
+
+    async def scan_yandex_xml(remaining: int) -> dict:
+        if remaining <= 0:
+            return {"collected": 0, "new": 0}
+        yandex_collected = 0
+        yandex_new = 0
+        results = await asyncio.to_thread(fetch_yandex_xml_results, settings, SIGNAL_QUERIES_RU)
+        for result in results:
+            if yandex_collected >= remaining:
+                break
+            yandex_collected += 1
+            if storage.is_seen(result.url):
+                continue
+            title = result.title or ""
+            summary = result.snippet or ""
+            lead = {
+                "title": title,
+                "url": result.url,
+                "published": "",
+                "source": "YandexXML",
+                "summary": summary,
+                "demand_score": demand_score(title, summary),
+                "segment": detect_segment(title, summary),
+                "timing": detect_timing(title, summary),
+                "company_guess": guess_company(title),
+            }
+            saved = storage.save_lead(lead)
+            storage.mark_seen(result.url)
+            if saved:
+                yandex_new += 1
+        return {"collected": yandex_collected, "new": yandex_new}
+
+    async def scan_yandex_serpapi(remaining: int) -> dict:
+        if remaining <= 0:
+            return {"collected": 0, "new": 0}
+        yandex_collected = 0
+        yandex_new = 0
+        results = await asyncio.to_thread(
+            fetch_yandex_serpapi_results, settings, SIGNAL_QUERIES_RU
+        )
+        for result in results:
+            if yandex_collected >= remaining:
+                break
+            yandex_collected += 1
+            url = result.get("url") or ""
+            if not url or storage.is_seen(url):
+                continue
+            title = result.get("title") or ""
+            summary = result.get("snippet") or ""
+            lead = {
+                "title": title,
+                "url": url,
+                "published": result.get("published") or "",
+                "source": "YandexSerpAPI",
+                "summary": summary,
+                "demand_score": demand_score(title, summary),
+                "segment": detect_segment(title, summary),
+                "timing": detect_timing(title, summary),
+                "company_guess": guess_company(title),
+            }
+            saved = storage.save_lead(lead)
+            storage.mark_seen(url)
+            if saved:
+                yandex_new += 1
+        return {"collected": yandex_collected, "new": yandex_new}
 
     for feed_url in feeds:
         items = await asyncio.to_thread(fetch_rss_items, feed_url)
@@ -203,6 +293,17 @@ async def run_radar_once(bot: Bot, storage: Storage, settings: Settings) -> dict
 
     remaining = settings.max_items_per_run - collected
     if remaining > 0:
+        if settings.yandex_xml_enabled:
+            yandex_result = await scan_yandex_xml(remaining)
+            collected += yandex_result["collected"]
+            new_leads += yandex_result["new"]
+        elif settings.yandex_serpapi_enabled:
+            yandex_result = await scan_yandex_serpapi(remaining)
+            collected += yandex_result["collected"]
+            new_leads += yandex_result["new"]
+
+    remaining = settings.max_items_per_run - collected
+    if remaining > 0:
         hh_result = await scan_hh_jobs(remaining)
         collected += hh_result["collected"]
         new_leads += hh_result["new"]
@@ -217,7 +318,7 @@ def build_dispatcher(storage: Storage, settings: Settings) -> Dispatcher:
     @dispatcher.message(Command("start"))
     async def handle_start(message: Message) -> None:
         await message.answer(
-            "ELP Market Radar готов. Доступные команды: /scan_now /radar /hot",
+            "ELP Market Radar готов. Доступные команды: /scan_now /radar /hot /hh_test",
             reply_markup=build_main_keyboard(),
         )
 
@@ -228,15 +329,16 @@ def build_dispatcher(storage: Storage, settings: Settings) -> Dispatcher:
             "Сканирование завершено. "
             f"Собрано: {result['collected']}, "
             f"Новые лиды: {result['new_leads']}, "
-            f"Отправлено hot: {result['sent']}"
+            f"Отправлено hot: {result['sent']}",
+            reply_markup=build_main_keyboard(),
         )
 
     @dispatcher.message(Command("radar"))
     async def handle_radar(message: Message) -> None:
         period_hours = storage.get_period_hours(message.chat.id)
-        rows = storage.leads_since(hours=period_hours, limit=10)
+        rows = storage.leads_since(message.chat.id, hours=period_hours, limit=10)
         if not rows:
-            await message.answer("Пока нет лидов.")
+            await message.answer("Пока нет лидов.", reply_markup=build_main_keyboard())
             return
         for row in rows:
             await message.answer(
@@ -248,9 +350,9 @@ def build_dispatcher(storage: Storage, settings: Settings) -> Dispatcher:
     @dispatcher.message(Command("hot"))
     async def handle_hot(message: Message) -> None:
         period_hours = storage.get_period_hours(message.chat.id)
-        rows = storage.leads_since(hours=period_hours, min_score=60, limit=10)
+        rows = storage.leads_since(message.chat.id, hours=period_hours, min_score=60, limit=10)
         if not rows:
-            await message.answer("Пока нет hot лидов.")
+            await message.answer("Пока нет hot лидов.", reply_markup=build_main_keyboard())
             return
         for row in rows:
             await message.answer(
@@ -271,6 +373,26 @@ def build_dispatcher(storage: Storage, settings: Settings) -> Dispatcher:
     async def handle_scan_now_button(message: Message, bot: Bot) -> None:
         await handle_scan_now(message, bot)
 
+    @dispatcher.message(F.text == "🧲 Лиды HH")
+    async def handle_hh_leads_button(message: Message) -> None:
+        period_hours = storage.get_period_hours(message.chat.id)
+        rows = storage.leads_since(
+            message.chat.id,
+            hours=period_hours,
+            min_score=60,
+            source="HeadHunter",
+            limit=10,
+        )
+        if not rows:
+            await message.answer("Пока нет hot лидов HH.", reply_markup=build_main_keyboard())
+            return
+        for row in rows:
+            await message.answer(
+                format_lead(dict(row)),
+                parse_mode="Markdown",
+                disable_web_page_preview=True,
+            )
+
     @dispatcher.message(F.text == "⏱ Период")
     async def handle_period_button(message: Message) -> None:
         await message.answer(
@@ -285,20 +407,51 @@ def build_dispatcher(storage: Storage, settings: Settings) -> Dispatcher:
             "Настройки:\n"
             f"Период: {describe_period(period_hours)}\n"
             "Hot: >=60\n"
-            f"Лимит отправки: {settings.max_send_per_run}"
+            f"Лимит отправки: {settings.max_send_per_run}",
+            reply_markup=build_main_keyboard(),
         )
 
     @dispatcher.callback_query(F.data.startswith("period:"))
     async def handle_period_select(callback: CallbackQuery) -> None:
         data = callback.data or ""
         value = data.split("period:", maxsplit=1)[-1]
-        mapping = {"24h": 24, "3d": 72, "7d": 168, "30d": 720}
-        hours = mapping.get(value, 168)
+        hours = int(value) if value.isdigit() else 168
         chat_id = callback.message.chat.id if callback.message else settings.admin_chat_id
         storage.set_period_hours(chat_id, hours)
         await callback.answer("Период обновлен")
         if callback.message:
             await callback.message.answer(f"Ок. Период: {describe_period(hours)}")
+
+    @dispatcher.message(Command("hh_test"))
+    async def handle_hh_test(message: Message) -> None:
+        if message.chat.id != settings.admin_chat_id:
+            await message.answer("Команда доступна только администратору.")
+            return
+        area_ids = get_hh_area_ids()
+        almaty_ids = area_ids.get("almaty") or []
+        kz_id = area_ids.get("kz")
+        lines = [
+            "HH debug:",
+            f"Алматы IDs: {', '.join(str(item) for item in almaty_ids) or 'не найдено'}",
+            f"KZ ID: {kz_id or 'не найдено'}",
+        ]
+        test_queries = ["руководитель склада", "warehouse manager", "supply chain"]
+        for query in test_queries:
+            area_to_use = almaty_ids[0] if almaty_ids else kz_id
+            if not area_to_use:
+                lines.append(f"- {query}: area not found")
+                continue
+            result = await asyncio.to_thread(fetch_hh_vacancies, query, area_to_use, 1)
+            examples = []
+            for item in result.items[:2]:
+                title = item.get("name") or ""
+                company = vacancy_company(item)
+                examples.append(f"{title} — {company}".strip(" —"))
+            example_text = "; ".join(examples) if examples else "нет примеров"
+            lines.append(
+                f"- {query}: status={result.status_code}, found={result.found}, {example_text}"
+            )
+        await message.answer("\n".join(lines), reply_markup=build_main_keyboard())
 
     return dispatcher
 

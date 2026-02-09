@@ -133,23 +133,25 @@ class Storage:
 
     def leads_since(
         self,
+        chat_id: int,
         hours: int,
         min_score: int | None = None,
+        source: str | None = None,
         limit: int = 10,
     ) -> list[sqlite3.Row]:
         since = datetime.utcnow() - timedelta(hours=hours)
         since_iso = since.isoformat()
-        if min_score is None:
-            query = (
-                "SELECT * FROM leads WHERE created_at >= ? ORDER BY created_at DESC LIMIT ?"
-            )
-            params: Iterable = (since_iso, limit)
-        else:
-            query = (
-                "SELECT * FROM leads WHERE created_at >= ? AND demand_score >= ? "
-                "ORDER BY created_at DESC LIMIT ?"
-            )
-            params = (since_iso, min_score, limit)
+        filters = ["created_at >= ?"]
+        params: list = [since_iso]
+        if min_score is not None:
+            filters.append("demand_score >= ?")
+            params.append(min_score)
+        if source:
+            filters.append("source = ?")
+            params.append(source)
+        where_clause = " AND ".join(filters)
+        query = f"SELECT * FROM leads WHERE {where_clause} ORDER BY created_at DESC LIMIT ?"
+        params.append(limit)
         rows = self._conn.execute(query, params).fetchall()
         return list(rows)
 
