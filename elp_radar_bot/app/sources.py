@@ -78,8 +78,8 @@ def build_google_news_rss(query: str, hl: str, gl: str, ceid: str) -> str:
 def get_all_feed_urls() -> list[str]:
     feeds: list[str] = []
     for query in SIGNAL_QUERIES_RU:
-        feeds.append(build_google_news_rss(query, hl="ru", gl="KZ", ceid="KZ:ru"))
+        feeds.append(build_google_news_rss(query, hl="ru", gl="RU", ceid="RU:ru"))
     for query in SIGNAL_QUERIES_EN:
-        feeds.append(build_google_news_rss(query, hl="en", gl="KZ", ceid="KZ:en"))
+        feeds.append(build_google_news_rss(query, hl="en", gl="RU", ceid="RU:en"))
     feeds.extend(OPTIONAL_FEEDS)
     return feeds
