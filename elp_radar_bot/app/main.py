@@ -4,9 +4,16 @@ import asyncio
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
-from aiogram import Bot, Dispatcher
+from aiogram import Bot, Dispatcher, F
 from aiogram.filters import Command
-from aiogram.types import Message
+from aiogram.types import (
+    CallbackQuery,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    KeyboardButton,
+    Message,
+    ReplyKeyboardMarkup,
+)
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
 
@@ -45,6 +52,37 @@ def format_lead(lead: dict) -> str:
         f"*Сигнал:* {title}\n"
         f"[Ссылка]({url})"
     )
+
+
+def build_main_keyboard() -> ReplyKeyboardMarkup:
+    return ReplyKeyboardMarkup(
+        keyboard=[
+            [KeyboardButton(text="🔥 Лиды"), KeyboardButton(text="📡 Радар")],
+            [KeyboardButton(text="⏱ Период"), KeyboardButton(text="🔎 Скан сейчас")],
+            [KeyboardButton(text="⚙️ Настройки")],
+        ],
+        resize_keyboard=True,
+    )
+
+
+def build_period_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(text="24 часа", callback_data="period:24h"),
+                InlineKeyboardButton(text="3 дня", callback_data="period:3d"),
+            ],
+            [
+                InlineKeyboardButton(text="7 дней", callback_data="period:7d"),
+                InlineKeyboardButton(text="30 дней", callback_data="period:30d"),
+            ],
+        ]
+    )
+
+
+def describe_period(hours: int) -> str:
+    mapping = {24: "24 часа", 72: "3 дня", 168: "7 дней", 720: "30 дней"}
+    return mapping.get(hours, f"{hours} ч")
 
 
 async def run_radar_once(bot: Bot, storage: Storage, settings: Settings) -> dict:
@@ -97,7 +135,8 @@ def build_dispatcher(storage: Storage, settings: Settings) -> Dispatcher:
     @dispatcher.message(Command("start"))
     async def handle_start(message: Message) -> None:
         await message.answer(
-            "ELP Market Radar готов. Доступные команды: /scan_now /radar /hot"
+            "ELP Market Radar готов. Доступные команды: /scan_now /radar /hot",
+            reply_markup=build_main_keyboard(),
         )
 
     @dispatcher.message(Command("scan_now"))
@@ -112,7 +151,8 @@ def build_dispatcher(storage: Storage, settings: Settings) -> Dispatcher:
 
     @dispatcher.message(Command("radar"))
     async def handle_radar(message: Message) -> None:
-        rows = storage.top_latest(limit=10)
+        period_hours = storage.get_period_hours(message.chat.id)
+        rows = storage.leads_since(hours=period_hours, limit=10)
         if not rows:
             await message.answer("Пока нет лидов.")
             return
@@ -125,7 +165,8 @@ def build_dispatcher(storage: Storage, settings: Settings) -> Dispatcher:
 
     @dispatcher.message(Command("hot"))
     async def handle_hot(message: Message) -> None:
-        rows = storage.top_latest(limit=10, min_score=60)
+        period_hours = storage.get_period_hours(message.chat.id)
+        rows = storage.leads_since(hours=period_hours, min_score=60, limit=10)
         if not rows:
             await message.answer("Пока нет hot лидов.")
             return
@@ -135,6 +176,47 @@ def build_dispatcher(storage: Storage, settings: Settings) -> Dispatcher:
                 parse_mode="Markdown",
                 disable_web_page_preview=True,
             )
+
+    @dispatcher.message(F.text == "🔥 Лиды")
+    async def handle_hot_button(message: Message) -> None:
+        await handle_hot(message)
+
+    @dispatcher.message(F.text == "📡 Радар")
+    async def handle_radar_button(message: Message) -> None:
+        await handle_radar(message)
+
+    @dispatcher.message(F.text == "🔎 Скан сейчас")
+    async def handle_scan_now_button(message: Message, bot: Bot) -> None:
+        await handle_scan_now(message, bot)
+
+    @dispatcher.message(F.text == "⏱ Период")
+    async def handle_period_button(message: Message) -> None:
+        await message.answer(
+            "Выбери период поиска сигналов:",
+            reply_markup=build_period_keyboard(),
+        )
+
+    @dispatcher.message(F.text == "⚙️ Настройки")
+    async def handle_settings_button(message: Message) -> None:
+        period_hours = storage.get_period_hours(message.chat.id)
+        await message.answer(
+            "Настройки:\n"
+            f"Период: {describe_period(period_hours)}\n"
+            "Hot: >=60\n"
+            f"Лимит отправки: {settings.max_send_per_run}"
+        )
+
+    @dispatcher.callback_query(F.data.startswith("period:"))
+    async def handle_period_select(callback: CallbackQuery) -> None:
+        data = callback.data or ""
+        value = data.split("period:", maxsplit=1)[-1]
+        mapping = {"24h": 24, "3d": 72, "7d": 168, "30d": 720}
+        hours = mapping.get(value, 168)
+        chat_id = callback.message.chat.id if callback.message else settings.admin_chat_id
+        storage.set_period_hours(chat_id, hours)
+        await callback.answer("Период обновлен")
+        if callback.message:
+            await callback.message.answer(f"Ок. Период: {describe_period(hours)}")
 
     return dispatcher
 
