@@ -1,0 +1,23 @@
+services:
+  - type: worker
+    name: elp-market-radar
+    env: docker
+    plan: starter
+    autoDeploy: true
+    envVars:
+      - key: BOT_TOKEN
+        sync: false
+      - key: ADMIN_CHAT_ID
+        sync: false
+      - key: TZ
+        value: Asia/Almaty
+      - key: DAILY_HOUR
+        value: "9"
+      - key: DAILY_MINUTE
+        value: "30"
+      - key: MAX_ITEMS_PER_RUN
+        value: "50"
+      - key: MAX_SEND_PER_RUN
+        value: "15"
+      - key: DB_PATH
+        value: "radar.db"
