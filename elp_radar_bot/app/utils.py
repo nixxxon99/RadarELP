@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import logging
 from typing import Iterable
 import feedparser
 from bs4 import BeautifulSoup
 
+logger = logging.getLogger(__name__)
 
 def clean_html(text: str) -> str:
     if not text:
@@ -15,6 +17,15 @@ def clean_html(text: str) -> str:
 def fetch_rss_items(feed_url: str) -> list[dict]:
     feed = feedparser.parse(feed_url)
     source_title = feed.feed.get("title", "")
+    if not feed.entries:
+        status = getattr(feed, "status", None)
+        bozo_exception = getattr(feed, "bozo_exception", None)
+        logger.warning(
+            "RSS feed returned 0 entries. url=%s status=%s bozo_exception=%s",
+            feed_url,
+            status,
+            bozo_exception,
+        )
     items: list[dict] = []
     for entry in feed.entries:
         url = entry.get("link")

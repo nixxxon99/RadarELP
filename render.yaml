@@ -3,6 +3,10 @@ services:
     name: elp-market-radar
     env: docker
     dockerfilePath: ./Dockerfile
+    disk:
+      name: radar-data
+      mountPath: /var/data
+      sizeGB: 1
     envVars:
       - key: TZ
         value: Asia/Almaty
