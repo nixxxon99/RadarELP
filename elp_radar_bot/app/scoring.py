@@ -141,3 +141,63 @@ def guess_company(title: str) -> str:
     candidate = parts[0].strip()
     candidate = candidate.strip('"“”')
     return candidate
+
+
+def tenant_match_score(profile: dict, listing: dict) -> tuple[int, list[str]]:
+    score = 0
+    reasons: list[str] = []
+    price = listing.get("price")
+    budget_min = profile.get("budget_min")
+    budget_max = profile.get("budget_max")
+    if price is not None:
+        if budget_min is not None and budget_max is not None:
+            if budget_min <= price <= budget_max:
+                score += 35
+                reasons.append("в бюджете")
+            else:
+                delta = min(abs(price - budget_min), abs(price - budget_max))
+                if delta <= max(1, (budget_max or budget_min) * 0.1):
+                    score += 15
+                    reasons.append("почти в бюджете")
+        elif budget_max is not None and price <= budget_max:
+            score += 30
+            reasons.append("в пределах бюджета")
+        elif budget_min is not None and price >= budget_min:
+            score += 20
+            reasons.append("выше минимального бюджета")
+
+    district = (profile.get("district") or "").lower()
+    listing_district = (listing.get("district") or "").lower()
+    if district and listing_district:
+        if district == listing_district or district in listing_district:
+            score += 25
+            reasons.append("нужный район")
+
+    property_type = (profile.get("property_type") or "").lower()
+    listing_type = (listing.get("property_type") or "").lower()
+    if property_type and listing_type:
+        if property_type in listing_type or listing_type in property_type:
+            score += 15
+            reasons.append("подходящий тип объекта")
+
+    pets_required = (profile.get("pets") or "").lower()
+    if pets_required in {"да", "yes"}:
+        if listing.get("pets_allowed"):
+            score += 10
+            reasons.append("можно с животными")
+        else:
+            score -= 5
+
+    parking_required = (profile.get("parking") or "").lower()
+    if parking_required in {"да", "yes"}:
+        if listing.get("parking"):
+            score += 10
+            reasons.append("есть парковка")
+        else:
+            score -= 5
+
+    if listing.get("verified_at"):
+        score += 5
+        reasons.append("актуальное объявление")
+
+    return max(score, 0), reasons

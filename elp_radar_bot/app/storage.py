@@ -56,6 +56,41 @@ class Storage:
                 )
                 """
             )
+            self._conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS tenant_profiles (
+                    chat_id INTEGER PRIMARY KEY,
+                    budget_min INTEGER,
+                    budget_max INTEGER,
+                    district TEXT,
+                    move_in TEXT,
+                    property_type TEXT,
+                    occupants INTEGER,
+                    pets TEXT,
+                    parking TEXT,
+                    updated_at TEXT
+                )
+                """
+            )
+            self._conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS rental_listings (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    title TEXT,
+                    url TEXT UNIQUE,
+                    price INTEGER,
+                    district TEXT,
+                    property_type TEXT,
+                    area REAL,
+                    pets_allowed INTEGER,
+                    parking INTEGER,
+                    available_from TEXT,
+                    verified_at TEXT,
+                    source TEXT,
+                    created_at TEXT
+                )
+                """
+            )
 
     def is_seen(self, url: str) -> bool:
         row = self._conn.execute("SELECT 1 FROM seen WHERE url = ?", (url,)).fetchone()
@@ -223,3 +258,89 @@ class Storage:
                 """,
                 (name, when.isoformat()),
             )
+
+    def upsert_tenant_profile(self, chat_id: int, profile: dict) -> None:
+        with self._conn:
+            self._conn.execute(
+                """
+                INSERT INTO tenant_profiles
+                    (chat_id, budget_min, budget_max, district, move_in, property_type, occupants, pets, parking, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(chat_id) DO UPDATE SET
+                    budget_min = excluded.budget_min,
+                    budget_max = excluded.budget_max,
+                    district = excluded.district,
+                    move_in = excluded.move_in,
+                    property_type = excluded.property_type,
+                    occupants = excluded.occupants,
+                    pets = excluded.pets,
+                    parking = excluded.parking,
+                    updated_at = excluded.updated_at
+                """,
+                (
+                    chat_id,
+                    profile.get("budget_min"),
+                    profile.get("budget_max"),
+                    profile.get("district"),
+                    profile.get("move_in"),
+                    profile.get("property_type"),
+                    profile.get("occupants"),
+                    profile.get("pets"),
+                    profile.get("parking"),
+                    datetime.utcnow().isoformat(),
+                ),
+            )
+
+    def get_tenant_profile(self, chat_id: int) -> dict | None:
+        row = self._conn.execute(
+            "SELECT * FROM tenant_profiles WHERE chat_id = ?",
+            (chat_id,),
+        ).fetchone()
+        return dict(row) if row else None
+
+    def save_listing(self, listing: dict) -> bool:
+        with self._conn:
+            cursor = self._conn.execute(
+                """
+                INSERT OR IGNORE INTO rental_listings
+                    (title, url, price, district, property_type, area, pets_allowed, parking, available_from, verified_at, source, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    listing.get("title"),
+                    listing.get("url"),
+                    listing.get("price"),
+                    listing.get("district"),
+                    listing.get("property_type"),
+                    listing.get("area"),
+                    listing.get("pets_allowed"),
+                    listing.get("parking"),
+                    listing.get("available_from"),
+                    listing.get("verified_at"),
+                    listing.get("source"),
+                    datetime.utcnow().isoformat(),
+                ),
+            )
+        return cursor.rowcount > 0
+
+    def mark_listing_verified(self, listing_id: int, when: datetime) -> None:
+        with self._conn:
+            self._conn.execute(
+                """
+                UPDATE rental_listings
+                SET verified_at = ?
+                WHERE id = ?
+                """,
+                (when.isoformat(), listing_id),
+            )
+
+    def list_listings(self, limit: int = 50, verified_only: bool = False) -> list[sqlite3.Row]:
+        if verified_only:
+            query = (
+                "SELECT * FROM rental_listings WHERE verified_at IS NOT NULL "
+                "ORDER BY created_at DESC LIMIT ?"
+            )
+        else:
+            query = "SELECT * FROM rental_listings ORDER BY created_at DESC LIMIT ?"
+        rows = self._conn.execute(query, (limit,)).fetchall()
+        return list(rows)

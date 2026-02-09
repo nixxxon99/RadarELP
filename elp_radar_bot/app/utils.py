@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import re
 from typing import Iterable
 
 from bs4 import BeautifulSoup
@@ -68,3 +69,42 @@ def chunked(items: Iterable, size: int) -> list[list]:
     if batch:
         batches.append(batch)
     return batches
+
+
+def parse_budget(text: str) -> tuple[int | None, int | None]:
+    if not text:
+        return None, None
+    normalized = text.lower()
+    numbers = [int(value.replace(" ", "")) for value in re.findall(r"\d[\d\s]*", normalized)]
+    if not numbers:
+        return None, None
+    if "до" in normalized and len(numbers) >= 1:
+        return None, numbers[0]
+    if "от" in normalized and len(numbers) >= 1:
+        return numbers[0], None
+    if len(numbers) >= 2:
+        return min(numbers[0], numbers[1]), max(numbers[0], numbers[1])
+    return None, numbers[0]
+
+
+def parse_yes_no(text: str) -> bool | None:
+    if not text:
+        return None
+    normalized = text.strip().lower()
+    yes_values = {"да", "yes", "y", "ага", "есть", "нужно"}
+    no_values = {"нет", "no", "n", "не нужно", "не надо"}
+    if normalized in yes_values:
+        return True
+    if normalized in no_values:
+        return False
+    return None
+
+
+def parse_positive_int(text: str) -> int | None:
+    if not text:
+        return None
+    match = re.search(r"\d+", text)
+    if not match:
+        return None
+    value = int(match.group(0))
+    return value if value > 0 else None

@@ -36,14 +36,30 @@ from app.hh_jobs import (
     HH_API_URL,
     HH_USER_AGENT,
 )
-from app.scoring import detect_segment, detect_timing, demand_score, guess_company
+from app.scoring import detect_segment, detect_timing, demand_score, guess_company, tenant_match_score
 from app.sources import SIGNAL_QUERIES_RU, get_all_feed_urls
 from app.storage import Storage
-from app.utils import fetch_rss_items
+from app.utils import fetch_rss_items, parse_budget, parse_positive_int, parse_yes_no
 from app.yandex_serpapi import fetch_yandex_serpapi_results
 from app.yandex_xml import fetch_yandex_xml_results
 
 logger = logging.getLogger(__name__)
+
+TENANT_FLOW_STEPS: list[tuple[str, str]] = [
+    ("budget", "Укажите бюджет (например, 200000-300000 или до 250000)."),
+    ("district", "Желаемый район/город?"),
+    ("move_in", "Срок заезда (дата или 'в течение месяца')?"),
+    ("property_type", "Тип объекта (квартира/дом/склад/офис)?"),
+    ("occupants", "Сколько проживающих/сотрудников будет использовать объект?"),
+    ("pets", "Есть ли животные? (да/нет)"),
+    ("parking", "Нужна парковка? (да/нет)"),
+]
+
+TENANT_FALLBACKS = [
+    "увеличить бюджет на 10%",
+    "рассмотреть соседние районы",
+    "сдвинуть срок заезда на 2–4 недели",
+]
 
 
 def escape_markdown(text: str) -> str:
@@ -76,12 +92,52 @@ def format_lead(lead: dict) -> str:
     )
 
 
+def format_tenant_profile(profile: dict) -> str:
+    budget_min = profile.get("budget_min")
+    budget_max = profile.get("budget_max")
+    if budget_min and budget_max:
+        budget_text = f"{budget_min}–{budget_max}"
+    elif budget_max:
+        budget_text = f"до {budget_max}"
+    elif budget_min:
+        budget_text = f"от {budget_min}"
+    else:
+        budget_text = "не указан"
+    return (
+        "Профиль арендатора:\n"
+        f"- бюджет: {budget_text}\n"
+        f"- район: {profile.get('district') or 'не указан'}\n"
+        f"- срок заезда: {profile.get('move_in') or 'не указан'}\n"
+        f"- тип объекта: {profile.get('property_type') or 'не указан'}\n"
+        f"- пользователи: {profile.get('occupants') or 'не указан'}\n"
+        f"- животные: {profile.get('pets') or 'не указано'}\n"
+        f"- парковка: {profile.get('parking') or 'не указано'}"
+    )
+
+
+def format_listing(listing: dict, score: int | None = None, reasons: list[str] | None = None) -> str:
+    score_text = f" | match {score}" if score is not None else ""
+    reasons_text = f" ({', '.join(reasons)})" if reasons else ""
+    return (
+        f"{listing.get('title') or 'Объект'}{score_text}{reasons_text}\n"
+        f"- цена: {listing.get('price') or 'не указана'}\n"
+        f"- район: {listing.get('district') or 'не указан'}\n"
+        f"- тип: {listing.get('property_type') or 'не указан'}\n"
+        f"- площадь: {listing.get('area') or 'не указана'}\n"
+        f"- парковка: {'да' if listing.get('parking') else 'нет'}\n"
+        f"- животные: {'можно' if listing.get('pets_allowed') else 'нельзя'}\n"
+        f"- актуальность: {listing.get('verified_at') or 'не проверено'}\n"
+        f"{listing.get('url') or ''}"
+    )
+
+
 def build_main_keyboard() -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup(
         keyboard=[
             [KeyboardButton(text="🔥 Лиды"), KeyboardButton(text="📡 Радар")],
             [KeyboardButton(text="🧲 Лиды HH"), KeyboardButton(text="🔥 HH Hot")],
             [KeyboardButton(text="⏱ Период"), KeyboardButton(text="🔎 Скан сейчас")],
+            [KeyboardButton(text="🏠 Арендаторы"), KeyboardButton(text="📨 Связаться")],
             [KeyboardButton(text="⚙️ Настройки")],
         ],
         resize_keyboard=True,
@@ -542,13 +598,145 @@ async def run_radar_once(bot: Bot, storage: Storage, settings: Settings) -> dict
 
 def build_dispatcher(storage: Storage, settings: Settings) -> Dispatcher:
     dispatcher = Dispatcher()
+    tenant_flows: dict[int, dict] = {}
+
+    async def prompt_tenant_step(message: Message, chat_id: int) -> None:
+        flow = tenant_flows.get(chat_id)
+        if not flow:
+            return
+        step_index = flow.get("step_index", 0)
+        if step_index >= len(TENANT_FLOW_STEPS):
+            profile = flow.get("data", {})
+            storage.upsert_tenant_profile(chat_id, profile)
+            tenant_flows.pop(chat_id, None)
+            await message.answer(format_tenant_profile(profile))
+            await message.answer(
+                "Если подходящих вариантов мало, могу:\n"
+                f"- {TENANT_FALLBACKS[0]}\n"
+                f"- {TENANT_FALLBACKS[1]}\n"
+                f"- {TENANT_FALLBACKS[2]}\n"
+                "Напишите /tenant_matches для подбора объектов.",
+                reply_markup=build_main_keyboard(),
+            )
+            return
+        _, question = TENANT_FLOW_STEPS[step_index]
+        await message.answer(question)
+
+    def update_tenant_flow(chat_id: int, updates: dict) -> None:
+        flow = tenant_flows.setdefault(chat_id, {"step_index": 0, "data": {}})
+        flow["data"].update(updates)
+        flow["step_index"] = flow.get("step_index", 0) + 1
+
+    async def handle_tenant_input(message: Message) -> None:
+        chat_id = message.chat.id
+        text = (message.text or "").strip()
+        if text.lower() in {"отмена", "cancel", "stop"}:
+            tenant_flows.pop(chat_id, None)
+            await message.answer("Ок, анкету остановил.", reply_markup=build_main_keyboard())
+            return
+        flow = tenant_flows.get(chat_id)
+        if not flow:
+            return
+        step_index = flow.get("step_index", 0)
+        if step_index >= len(TENANT_FLOW_STEPS):
+            await prompt_tenant_step(message, chat_id)
+            return
+        step_key, _ = TENANT_FLOW_STEPS[step_index]
+        if step_key == "budget":
+            budget_min, budget_max = parse_budget(text)
+            if budget_min is None and budget_max is None:
+                await message.answer("Не понял бюджет. Пример: 200000-300000 или до 250000.")
+                return
+            update_tenant_flow(chat_id, {"budget_min": budget_min, "budget_max": budget_max})
+        elif step_key == "occupants":
+            occupants = parse_positive_int(text)
+            if occupants is None:
+                await message.answer("Введите количество числом.")
+                return
+            update_tenant_flow(chat_id, {"occupants": occupants})
+        elif step_key in {"pets", "parking"}:
+            value = parse_yes_no(text)
+            if value is None:
+                await message.answer("Ответьте 'да' или 'нет'.")
+                return
+            update_tenant_flow(chat_id, {step_key: "да" if value else "нет"})
+        else:
+            update_tenant_flow(chat_id, {step_key: text})
+        await prompt_tenant_step(message, chat_id)
 
     @dispatcher.message(Command("start"))
     async def handle_start(message: Message) -> None:
         await message.answer(
-            "ELP Market Radar готов. Доступные команды: /scan_now /radar /hot /hh_test",
+            "ELP Market Radar готов. Доступные команды: /scan_now /radar /hot /tenant /tenant_matches /hh_test",
             reply_markup=build_main_keyboard(),
         )
+
+    @dispatcher.message(Command("tenant"))
+    async def handle_tenant_start(message: Message) -> None:
+        tenant_flows[message.chat.id] = {"step_index": 0, "data": {}}
+        await message.answer("Запускаю анкету арендатора. Можно остановить словом 'отмена'.")
+        await prompt_tenant_step(message, message.chat.id)
+
+    @dispatcher.message(Command("tenant_profile"))
+    async def handle_tenant_profile(message: Message) -> None:
+        profile = storage.get_tenant_profile(message.chat.id)
+        if not profile:
+            await message.answer("Профиль пока не заполнен. Запустите /tenant.")
+            return
+        await message.answer(format_tenant_profile(profile))
+
+    @dispatcher.message(Command("tenant_matches"))
+    async def handle_tenant_matches(message: Message) -> None:
+        profile = storage.get_tenant_profile(message.chat.id)
+        if not profile:
+            await message.answer("Сначала заполните анкету через /tenant.")
+            return
+        listings = storage.list_listings(limit=50)
+        if not listings:
+            await message.answer(
+                "Пока нет объявлений для подбора. "
+                "Можно расширить критерии:\n"
+                f"- {TENANT_FALLBACKS[0]}\n"
+                f"- {TENANT_FALLBACKS[1]}\n"
+                f"- {TENANT_FALLBACKS[2]}"
+            )
+            return
+        scored: list[tuple[int, list[str], dict]] = []
+        for listing in listings:
+            score, reasons = tenant_match_score(profile, dict(listing))
+            scored.append((score, reasons, dict(listing)))
+        scored.sort(key=lambda item: item[0], reverse=True)
+        top = scored[:5]
+        if not top or top[0][0] == 0:
+            await message.answer(
+                "Не нашел точных совпадений. Могу расширить параметры:\n"
+                f"- {TENANT_FALLBACKS[0]}\n"
+                f"- {TENANT_FALLBACKS[1]}\n"
+                f"- {TENANT_FALLBACKS[2]}"
+            )
+            return
+        for score, reasons, listing in top:
+            await message.answer(format_listing(listing, score=score, reasons=reasons))
+
+    @dispatcher.message(Command("tenant_contact"))
+    async def handle_tenant_contact(message: Message, bot: Bot) -> None:
+        profile = storage.get_tenant_profile(message.chat.id)
+        if not profile:
+            await message.answer("Сначала заполните анкету через /tenant.")
+            return
+        await bot.send_message(
+            settings.admin_chat_id,
+            "Запрос от арендатора:\n" + format_tenant_profile(profile),
+        )
+        await message.answer("Контакт передан, скоро свяжемся.")
+
+    @dispatcher.message()
+    async def handle_tenant_flow_message(message: Message) -> None:
+        if message.chat.id not in tenant_flows:
+            return
+        if message.text and message.text.startswith("/"):
+            return
+        await handle_tenant_input(message)
 
     @dispatcher.message(Command("scan_now"))
     async def handle_scan_now(message: Message, bot: Bot) -> None:
@@ -651,6 +839,14 @@ def build_dispatcher(storage: Storage, settings: Settings) -> Dispatcher:
             "Выбери период поиска сигналов:",
             reply_markup=build_period_keyboard(),
         )
+
+    @dispatcher.message(F.text == "🏠 Арендаторы")
+    async def handle_tenant_button(message: Message) -> None:
+        await handle_tenant_start(message)
+
+    @dispatcher.message(F.text == "📨 Связаться")
+    async def handle_tenant_contact_button(message: Message, bot: Bot) -> None:
+        await handle_tenant_contact(message, bot)
 
     @dispatcher.message(F.text == "⚙️ Настройки")
     async def handle_settings_button(message: Message) -> None:
