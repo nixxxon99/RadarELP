@@ -155,6 +155,24 @@ def format_scan_report(result: dict) -> str:
     return "\n".join(lines)
 
 
+def is_relevant_lead(title: str, summary: str) -> bool:
+    text = f"{title} {summary}".lower()
+    if not any(keyword in text for keyword in ("казахстан", "almaty", "алматы", "astana", "астана", "kazakhstan")):
+        return False
+    segment = detect_segment(title, summary)
+    allowed_segments = {
+        "E-COM",
+        "3PL",
+        "FMCG",
+        "Distribution",
+        "Warehouse Real Estate",
+        "Auto/Spec Tech",
+        "Cold Chain",
+        "Industrial",
+    }
+    return segment in allowed_segments
+
+
 async def run_radar_once(bot: Bot, storage: Storage, settings: Settings) -> dict:
     feeds = get_all_feed_urls()
     collected = 0
@@ -354,6 +372,10 @@ async def run_radar_once(bot: Bot, storage: Storage, settings: Settings) -> dict
                 continue
             title = result.title or ""
             summary = result.snippet or ""
+            if not is_relevant_lead(title, summary):
+                storage.mark_seen(result.url)
+                yandex_seen += 1
+                continue
             lead = {
                 "title": title,
                 "url": result.url,
@@ -394,6 +416,10 @@ async def run_radar_once(bot: Bot, storage: Storage, settings: Settings) -> dict
                 continue
             title = result.get("title") or ""
             summary = result.get("snippet") or ""
+            if not is_relevant_lead(title, summary):
+                storage.mark_seen(url)
+                yandex_seen += 1
+                continue
             lead = {
                 "title": title,
                 "url": url,
@@ -439,6 +465,10 @@ async def run_radar_once(bot: Bot, storage: Storage, settings: Settings) -> dict
 
             title = item.get("title", "")
             summary = item.get("summary", "")
+            if not is_relevant_lead(title, summary):
+                storage.mark_seen(url)
+                rss_seen += 1
+                continue
             lead = {
                 **item,
                 "demand_score": demand_score(title, summary),
@@ -483,6 +513,8 @@ async def run_radar_once(bot: Bot, storage: Storage, settings: Settings) -> dict
             hh_disabled = True
         collected += hh_result["collected"]
         new_leads += hh_result["new"]
+    else:
+        hh_skipped_reason = "limit reached by RSS/Yandex"
 
     seen_total = rss_seen + yandex_seen + hh_seen
     return {
