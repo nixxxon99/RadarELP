@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from datetime import datetime, timedelta
+import html
 import errno
 import fcntl
 import logging
@@ -93,33 +94,29 @@ def acquire_polling_lock(db_path: str) -> tuple[IO[str], str] | None:
     return lock_handle, lock_path
 
 
-def escape_markdown(text: str) -> str:
-    if not text:
-        return ""
-    escape_chars = "_*`[]"
-    for char in escape_chars:
-        text = text.replace(char, f"\\{char}")
-    return text
+def escape_html(text: str) -> str:
+    return html.escape(text or "")
 
 
 def format_lead(lead: dict) -> str:
-    company = escape_markdown(lead.get("company_guess") or "—")
-    title = escape_markdown(lead.get("title") or "")
-    source = escape_markdown(lead.get("source") or "")
-    published = escape_markdown(lead.get("published") or "")
-    segment = escape_markdown(lead.get("segment") or "Other")
-    timing = escape_markdown(lead.get("timing") or "")
+    company = escape_html(lead.get("company_guess") or "—")
+    title = escape_html(lead.get("title") or "")
+    source = escape_html(lead.get("source") or "")
+    published = escape_html(lead.get("published") or "")
+    segment = escape_html(lead.get("segment") or "Other")
+    timing = escape_html(lead.get("timing") or "")
     score = lead.get("demand_score") or 0
-    url = lead.get("url") or ""
+    url = escape_html(lead.get("url") or "")
+    link = f"<a href=\"{url}\">Ссылка</a>" if url else "Ссылка недоступна"
 
     return (
-        f"*Компания:* {company}\n"
-        f"*Demand Score:* {score}\n"
-        f"*Сегмент:* {segment}\n"
-        f"*Тайминг:* {timing}\n"
-        f"*Дата/источник:* {published} | {source}\n"
-        f"*Сигнал:* {title}\n"
-        f"[Ссылка]({url})"
+        f"<b>Компания:</b> {company}\n"
+        f"<b>Demand Score:</b> {score}\n"
+        f"<b>Сегмент:</b> {segment}\n"
+        f"<b>Тайминг:</b> {timing}\n"
+        f"<b>Дата/источник:</b> {published} | {source}\n"
+        f"<b>Сигнал:</b> {title}\n"
+        f"{link}"
     )
 
 
@@ -137,28 +134,36 @@ def format_tenant_profile(profile: dict) -> str:
     return (
         "Профиль арендатора:\n"
         f"- бюджет: {budget_text}\n"
-        f"- район: {profile.get('district') or 'не указан'}\n"
-        f"- срок заезда: {profile.get('move_in') or 'не указан'}\n"
-        f"- тип объекта: {profile.get('property_type') or 'не указан'}\n"
-        f"- пользователи: {profile.get('occupants') or 'не указан'}\n"
-        f"- животные: {profile.get('pets') or 'не указано'}\n"
-        f"- парковка: {profile.get('parking') or 'не указано'}"
+        f"- район: {escape_html(profile.get('district') or 'не указан')}\n"
+        f"- срок заезда: {escape_html(profile.get('move_in') or 'не указан')}\n"
+        f"- тип объекта: {escape_html(profile.get('property_type') or 'не указан')}\n"
+        f"- пользователи: {escape_html(str(profile.get('occupants') or 'не указан'))}\n"
+        f"- животные: {escape_html(profile.get('pets') or 'не указано')}\n"
+        f"- парковка: {escape_html(profile.get('parking') or 'не указано')}"
     )
 
 
 def format_listing(listing: dict, score: int | None = None, reasons: list[str] | None = None) -> str:
     score_text = f" | match {score}" if score is not None else ""
     reasons_text = f" ({', '.join(reasons)})" if reasons else ""
+    title = escape_html(listing.get("title") or "Объект")
+    price = escape_html(str(listing.get("price") or "не указана"))
+    district = escape_html(listing.get("district") or "не указан")
+    property_type = escape_html(listing.get("property_type") or "не указан")
+    area = escape_html(str(listing.get("area") or "не указана"))
+    verified_at = escape_html(listing.get("verified_at") or "не проверено")
+    url = escape_html(listing.get("url") or "")
+    link = f"<a href=\"{url}\">Ссылка</a>" if url else ""
     return (
-        f"{listing.get('title') or 'Объект'}{score_text}{reasons_text}\n"
-        f"- цена: {listing.get('price') or 'не указана'}\n"
-        f"- район: {listing.get('district') or 'не указан'}\n"
-        f"- тип: {listing.get('property_type') or 'не указан'}\n"
-        f"- площадь: {listing.get('area') or 'не указана'}\n"
+        f"{title}{score_text}{reasons_text}\n"
+        f"- цена: {price}\n"
+        f"- район: {district}\n"
+        f"- тип: {property_type}\n"
+        f"- площадь: {area}\n"
         f"- парковка: {'да' if listing.get('parking') else 'нет'}\n"
         f"- животные: {'можно' if listing.get('pets_allowed') else 'нельзя'}\n"
-        f"- актуальность: {listing.get('verified_at') or 'не проверено'}\n"
-        f"{listing.get('url') or ''}"
+        f"- актуальность: {verified_at}\n"
+        f"{link}"
     )
 
 
@@ -426,7 +431,7 @@ async def run_radar_once(bot: Bot, storage: Storage, settings: Settings) -> dict
                         await bot.send_message(
                             chat_id=settings.admin_chat_id,
                             text=format_lead(lead),
-                            parse_mode="Markdown",
+                            parse_mode="HTML",
                             disable_web_page_preview=True,
                         )
                         sent += 1
@@ -572,7 +577,7 @@ async def run_radar_once(bot: Bot, storage: Storage, settings: Settings) -> dict
                     await bot.send_message(
                         chat_id=settings.admin_chat_id,
                         text=format_lead(lead),
-                        parse_mode="Markdown",
+                        parse_mode="HTML",
                         disable_web_page_preview=True,
                     )
                     sent += 1
@@ -747,7 +752,11 @@ def build_dispatcher(storage: Storage, settings: Settings) -> Dispatcher:
             )
             return
         for score, reasons, listing in top:
-            await message.answer(format_listing(listing, score=score, reasons=reasons))
+            await message.answer(
+                format_listing(listing, score=score, reasons=reasons),
+                parse_mode="HTML",
+                disable_web_page_preview=True,
+            )
 
     @dispatcher.message(Command("tenant_contact"))
     async def handle_tenant_contact(message: Message, bot: Bot) -> None:
@@ -791,7 +800,7 @@ def build_dispatcher(storage: Storage, settings: Settings) -> Dispatcher:
         for row in rows:
             await message.answer(
                 format_lead(dict(row)),
-                parse_mode="Markdown",
+                parse_mode="HTML",
                 disable_web_page_preview=True,
             )
 
@@ -805,7 +814,7 @@ def build_dispatcher(storage: Storage, settings: Settings) -> Dispatcher:
         for row in rows:
             await message.answer(
                 format_lead(dict(row)),
-                parse_mode="Markdown",
+                parse_mode="HTML",
                 disable_web_page_preview=True,
             )
 
@@ -836,7 +845,7 @@ def build_dispatcher(storage: Storage, settings: Settings) -> Dispatcher:
         for row in rows:
             await message.answer(
                 format_lead(dict(row)),
-                parse_mode="Markdown",
+                parse_mode="HTML",
                 disable_web_page_preview=True,
             )
 
@@ -856,7 +865,7 @@ def build_dispatcher(storage: Storage, settings: Settings) -> Dispatcher:
         for row in rows:
             await message.answer(
                 format_lead(dict(row)),
-                parse_mode="Markdown",
+                parse_mode="HTML",
                 disable_web_page_preview=True,
             )
 
