@@ -48,6 +48,14 @@ class Storage:
                 )
                 """
             )
+            self._conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS scan_state (
+                    name TEXT PRIMARY KEY,
+                    last_run TEXT
+                )
+                """
+            )
 
     def is_seen(self, url: str) -> bool:
         row = self._conn.execute("SELECT 1 FROM seen WHERE url = ?", (url,)).fetchone()
@@ -147,3 +155,24 @@ class Storage:
 
     def close(self) -> None:
         self._conn.close()
+
+    def get_last_scan(self, name: str) -> datetime | None:
+        row = self._conn.execute(
+            "SELECT last_run FROM scan_state WHERE name = ?",
+            (name,),
+        ).fetchone()
+        if not row or not row["last_run"]:
+            return None
+        return datetime.fromisoformat(row["last_run"])
+
+    def set_last_scan(self, name: str, when: datetime) -> None:
+        with self._conn:
+            self._conn.execute(
+                """
+                INSERT INTO scan_state (name, last_run)
+                VALUES (?, ?)
+                ON CONFLICT(name) DO UPDATE SET
+                    last_run = excluded.last_run
+                """,
+                (name, when.isoformat()),
+            )
