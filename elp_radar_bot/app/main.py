@@ -35,12 +35,20 @@ from app.hh_jobs import (
     strong_signal_bonus,
     vacancy_city,
     vacancy_company,
+    vacancy_role,
     vacancy_summary,
     vacancy_url,
     HH_API_URL,
     HH_USER_AGENT,
 )
-from app.scoring import detect_segment, detect_timing, demand_score, guess_company, tenant_match_score
+from app.scoring import (
+    detect_expansion_tags,
+    detect_segment,
+    detect_timing,
+    demand_score,
+    guess_company,
+    tenant_match_score,
+)
 from app.sources import SIGNAL_QUERIES_RU, get_all_feed_urls
 from app.storage import Storage
 from app.utils import fetch_rss_items, parse_budget, parse_positive_int, parse_yes_no
@@ -105,15 +113,18 @@ def format_lead(lead: dict) -> str:
     published = escape_html(lead.get("published") or "")
     segment = escape_html(lead.get("segment") or "Other")
     timing = escape_html(lead.get("timing") or "")
+    tags = escape_html(lead.get("tags") or "")
     score = lead.get("demand_score") or 0
     url = escape_html(lead.get("url") or "")
     link = f"<a href=\"{url}\">Ссылка</a>" if url else "Ссылка недоступна"
 
+    tags_line = f"<b>Теги:</b> {tags}\n" if tags else ""
     return (
         f"<b>Компания:</b> {company}\n"
         f"<b>Demand Score:</b> {score}\n"
         f"<b>Сегмент:</b> {segment}\n"
         f"<b>Тайминг:</b> {timing}\n"
+        f"{tags_line}"
         f"<b>Дата/источник:</b> {published} | {source}\n"
         f"<b>Сигнал:</b> {title}\n"
         f"{link}"
@@ -411,7 +422,18 @@ async def run_radar_once(bot: Bot, storage: Storage, settings: Settings) -> dict
                 summary = vacancy_summary(vacancy, detail)
                 published = vacancy.get("published_at") or ""
                 base_score = max(70, demand_score(title, summary))
-                score = min(100, base_score + strong_signal_bonus(f"{title} {summary}"))
+                tags = detect_expansion_tags(title, summary)
+                expansion_bonus = 0
+                if "expansion" in tags:
+                    expansion_bonus += 10
+                if "warehouse_need" in tags:
+                    expansion_bonus += 10
+                score = min(
+                    100,
+                    base_score
+                    + strong_signal_bonus(f"{title} {summary}")
+                    + expansion_bonus,
+                )
                 lead = {
                     "title": title,
                     "url": url,
@@ -422,6 +444,12 @@ async def run_radar_once(bot: Bot, storage: Storage, settings: Settings) -> dict
                     "segment": detect_segment(title, summary),
                     "timing": "0–3 мес",
                     "company_guess": company or guess_company(title),
+                    "company": company,
+                    "city": city,
+                    "role": vacancy_role(vacancy),
+                    "tags": ", ".join(tags),
+                    "last_seen": now.isoformat(),
+                    "repeat_count": 1,
                 }
                 saved = storage.save_lead(lead)
                 storage.mark_seen(url)
