@@ -799,14 +799,6 @@ def build_dispatcher(storage: Storage, settings: Settings) -> Dispatcher:
         )
         await message.answer("Контакт передан, скоро свяжемся.")
 
-    @dispatcher.message()
-    async def handle_tenant_flow_message(message: Message) -> None:
-        if message.chat.id not in tenant_flows:
-            return
-        if message.text and message.text.startswith("/"):
-            return
-        await handle_tenant_input(message)
-
     @dispatcher.message(Command("scan_now"))
     async def handle_scan_now(message: Message, bot: Bot) -> None:
         try:
@@ -1102,6 +1094,14 @@ def build_dispatcher(storage: Storage, settings: Settings) -> Dispatcher:
             f"MAX_SEND_PER_RUN env: {max_send_env or 'unset'}\n",
             reply_markup=build_main_keyboard(),
         )
+
+    @dispatcher.message()
+    async def handle_tenant_flow_message(message: Message) -> None:
+        if message.chat.id not in tenant_flows:
+            return
+        if message.text and message.text.startswith("/"):
+            return
+        await handle_tenant_input(message)
 
     return dispatcher
 
