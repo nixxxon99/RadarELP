@@ -207,6 +207,50 @@ def build_period_keyboard() -> InlineKeyboardMarkup:
     )
 
 
+async def send_leads_with_fallback(
+    message: Message,
+    storage: Storage,
+    *,
+    period_hours: int,
+    empty_text: str,
+    min_score: int | None = None,
+    source: str | None = None,
+    limit: int = 10,
+) -> bool:
+    rows = storage.leads_since(
+        message.chat.id,
+        hours=period_hours,
+        min_score=min_score,
+        source=source,
+        limit=limit,
+    )
+    used_fallback = False
+    if not rows:
+        rows = storage.leads_since(
+            message.chat.id,
+            hours=24 * 365,
+            min_score=min_score,
+            source=source,
+            limit=limit,
+        )
+        used_fallback = bool(rows)
+    if not rows:
+        await message.answer(empty_text, reply_markup=build_main_keyboard())
+        return False
+    if used_fallback:
+        await message.answer(
+            "За выбранный период лидов нет. Показываю более ранние потенциальные лиды.",
+            reply_markup=build_main_keyboard(),
+        )
+    for row in rows:
+        await message.answer(
+            format_lead(dict(row)),
+            parse_mode="HTML",
+            disable_web_page_preview=True,
+        )
+    return True
+
+
 def describe_period(hours: int) -> str:
     mapping = {24: "24 часа", 72: "3 дня", 168: "7 дней", 720: "30 дней"}
     return mapping.get(hours, f"{hours} ч")
@@ -814,30 +858,25 @@ def build_dispatcher(storage: Storage, settings: Settings) -> Dispatcher:
     @dispatcher.message(Command("radar"))
     async def handle_radar(message: Message) -> None:
         period_hours = storage.get_period_hours(message.chat.id)
-        rows = storage.leads_since(message.chat.id, hours=period_hours, limit=10)
-        if not rows:
-            await message.answer("Пока нет лидов.", reply_markup=build_main_keyboard())
-            return
-        for row in rows:
-            await message.answer(
-                format_lead(dict(row)),
-                parse_mode="HTML",
-                disable_web_page_preview=True,
-            )
+        await send_leads_with_fallback(
+            message,
+            storage,
+            period_hours=period_hours,
+            empty_text="Пока нет лидов.",
+            limit=10,
+        )
 
     @dispatcher.message(Command("hot"))
     async def handle_hot(message: Message) -> None:
         period_hours = storage.get_period_hours(message.chat.id)
-        rows = storage.leads_since(message.chat.id, hours=period_hours, min_score=60, limit=10)
-        if not rows:
-            await message.answer("Пока нет hot лидов.", reply_markup=build_main_keyboard())
-            return
-        for row in rows:
-            await message.answer(
-                format_lead(dict(row)),
-                parse_mode="HTML",
-                disable_web_page_preview=True,
-            )
+        await send_leads_with_fallback(
+            message,
+            storage,
+            period_hours=period_hours,
+            min_score=60,
+            empty_text="Пока нет hot лидов.",
+            limit=10,
+        )
 
     @dispatcher.message(F.text == "🔥 Лиды")
     async def handle_hot_button(message: Message) -> None:
@@ -854,41 +893,27 @@ def build_dispatcher(storage: Storage, settings: Settings) -> Dispatcher:
     @dispatcher.message(F.text == "🧲 Лиды HH")
     async def handle_hh_leads_button(message: Message) -> None:
         period_hours = storage.get_period_hours(message.chat.id)
-        rows = storage.leads_since(
-            message.chat.id,
-            hours=period_hours,
+        await send_leads_with_fallback(
+            message,
+            storage,
+            period_hours=period_hours,
             source="HeadHunter",
+            empty_text="Пока нет лидов HH.",
             limit=10,
         )
-        if not rows:
-            await message.answer("Пока нет лидов HH.", reply_markup=build_main_keyboard())
-            return
-        for row in rows:
-            await message.answer(
-                format_lead(dict(row)),
-                parse_mode="HTML",
-                disable_web_page_preview=True,
-            )
 
     @dispatcher.message(Command("hh_hot"))
     async def handle_hh_hot(message: Message) -> None:
         period_hours = storage.get_period_hours(message.chat.id)
-        rows = storage.leads_since(
-            message.chat.id,
-            hours=period_hours,
+        await send_leads_with_fallback(
+            message,
+            storage,
+            period_hours=period_hours,
             min_score=60,
             source="HeadHunter",
+            empty_text="Пока нет hot лидов HH.",
             limit=10,
         )
-        if not rows:
-            await message.answer("Пока нет hot лидов HH.", reply_markup=build_main_keyboard())
-            return
-        for row in rows:
-            await message.answer(
-                format_lead(dict(row)),
-                parse_mode="HTML",
-                disable_web_page_preview=True,
-            )
 
     @dispatcher.message(F.text == "🔥 HH Hot")
     async def handle_hh_hot_button(message: Message) -> None:
